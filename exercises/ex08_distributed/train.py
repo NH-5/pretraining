@@ -1,0 +1,282 @@
+"""Ex8: compare manual data parallel, DDP, and FSDP on 2+ processes."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import time
+from typing import Any
+
+import torch
+import torch.distributed as dist
+from torch import nn
+from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel
+
+from utils import (
+    DistributedContext,
+    cleanup_distributed,
+    initialize_distributed,
+    peak_memory_mib,
+)
+
+
+TODO_IDS = (
+    "EX08_ALL_REDUCE",
+    "EX08_SINGLE_CARD_EQUIVALENCE",
+    "EX08_FSDP_WRAP",
+    "EX08_MFU",
+)
+
+
+@dataclass(frozen=True)
+class Config:
+    hidden_size: int = 128
+    vocab_size: int = 256
+    micro_batch_size: int = 8
+    sequence_length: int = 64
+    steps: int = 20
+    learning_rate: float = 1e-2
+    seed: int = 17
+
+
+class TokenClassifier(nn.Module):
+    """A flat classification workload that does not reveal Ex1 sequence loss."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(config.hidden_size, 4 * config.hidden_size),
+            nn.GELU(),
+            nn.Linear(4 * config.hidden_size, config.vocab_size),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.network(features)
+
+
+def average_gradients(model: nn.Module, world_size: int) -> None:
+    """Make every replica hold the mean gradient across ranks."""
+    # TODO(你)[EX08_ALL_REDUCE]: 见指南 §9.1。
+    #   对每个非空 grad 做 SUM all-reduce，再除 world_size；操作是 in-place。
+    #   完成标准:各 rank step 后参数 max_abs_diff < 1e-6。
+    raise NotImplementedError("TODO[EX08_ALL_REDUCE]")
+
+
+def wrap_ddp(model: nn.Module, context: DistributedContext) -> nn.Module:
+    """Use PyTorch DDP after manually understanding its gradient collective."""
+    if context.device.type == "cuda":
+        return DistributedDataParallel(
+            model,
+            device_ids=[context.local_rank],
+            output_device=context.local_rank,
+        )
+    return DistributedDataParallel(model)
+
+
+def wrap_fsdp(model: nn.Module, context: DistributedContext) -> nn.Module:
+    """Wrap with PyTorch FSDP and document what is sharded."""
+    # TODO(你)[EX08_FSDP_WRAP]: 见指南 §9.2。
+    #   方向:使用 torch.distributed.fsdp.FullyShardedDataParallel。
+    #   完成标准:说明 params/grad/optimizer state 各在哪里分片，并报每卡显存。
+    raise NotImplementedError("TODO[EX08_FSDP_WRAP]")
+
+
+def verify_against_single_card(
+    *,
+    initial_state: dict[str, torch.Tensor],
+    distributed_model: nn.Module,
+    context: DistributedContext,
+    config: Config,
+) -> float:
+    """Return max parameter error versus an equivalent single-card reference run."""
+    # TODO(你)[EX08_SINGLE_CARD_EQUIVALENCE]: 见指南 §9.1。
+    #   方向:rank 0 重建各 rank 的确定性 batch，用相同初始权重跑同样 steps。
+    #   所有 rank 都会进入本函数；rank 0 算差异后 broadcast，避免 collective 死锁。
+    #   完成标准:manual/DDP 与 reference 的 max_abs_diff 在容差内。
+    raise NotImplementedError("TODO[EX08_SINGLE_CARD_EQUIVALENCE]")
+
+
+def estimate_mfu(
+    *,
+    num_parameters: int,
+    global_tokens_per_second: float,
+    peak_tflops_per_gpu: float,
+    world_size: int,
+) -> float:
+    """Reuse the Ex6 estimate on measured distributed throughput."""
+    # TODO(你)[EX08_MFU]: 复用并解释 Ex6 的 MFU 公式。
+    #   完成标准:使用真实 peak TFLOP/s，不拿产品宣传的低精度峰值冒充 fp32。
+    raise NotImplementedError("TODO[EX08_MFU]")
+
+
+def make_local_batch(
+    config: Config,
+    *,
+    rank: int,
+    step: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    generator = torch.Generator().manual_seed(
+        config.seed + rank * 100_000 + step
+    )
+    features = torch.randn(
+        config.micro_batch_size * config.sequence_length,
+        config.hidden_size,
+        generator=generator,
+    ).to(device)
+    labels = torch.randint(
+        0,
+        config.vocab_size,
+        (config.micro_batch_size * config.sequence_length,),
+        generator=generator,
+    ).to(device)
+    return features, labels
+
+
+def unwrap_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in unwrapped.state_dict().items()
+    }
+
+
+def run(
+    strategy: str,
+    peak_tflops: float | None,
+    config: Config,
+) -> None:
+    context = initialize_distributed()
+    try:
+        torch.manual_seed(config.seed)
+        model: nn.Module = TokenClassifier(config).to(context.device)
+        initial_state = unwrap_state_dict(model)
+        if strategy == "ddp":
+            model = wrap_ddp(model, context)
+        elif strategy == "fsdp":
+            model = wrap_fsdp(model, context)
+        optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate)
+        if context.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(context.device)
+
+        dist.barrier()
+        start = time.perf_counter()
+        final_loss = 0.0
+        for step in range(config.steps):
+            features, labels = make_local_batch(
+                config,
+                rank=context.rank,
+                step=step,
+                device=context.device,
+            )
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(features)
+            # This is ordinary flat classification; Ex1's [B,T,V] loss stays TODO.
+            loss = F.cross_entropy(logits, labels)
+            loss.backward()
+            if strategy == "manual":
+                average_gradients(model, context.world_size)
+            optimizer.step()
+            final_loss = loss.item()
+        dist.barrier()
+        elapsed = time.perf_counter() - start
+
+        global_tokens = (
+            config.steps
+            * config.micro_batch_size
+            * config.sequence_length
+            * context.world_size
+        )
+        report: dict[str, Any] = {
+            "rank": context.rank,
+            "strategy": strategy,
+            "backend": context.backend,
+            "device": str(context.device),
+            "final_local_loss": final_loss,
+            "elapsed_seconds": elapsed,
+            "global_tokens_per_second": global_tokens / elapsed,
+            "peak_memory_mib": peak_memory_mib(context.device),
+        }
+        gathered: list[dict[str, Any] | None] | None = (
+            [None] * context.world_size if context.rank == 0 else None
+        )
+        dist.gather_object(report, gathered, dst=0)
+        difference = verify_against_single_card(
+            initial_state=initial_state,
+            distributed_model=model,
+            context=context,
+            config=config,
+        )
+        if context.rank == 0:
+            print("Per-rank reports:")
+            for item in gathered or []:
+                print(item)
+            print(f"single-card max_abs_diff={difference:.3e}")
+            if peak_tflops is not None:
+                # initial_state was captured before DDP/FSDP sharding, so this is global N.
+                params = sum(value.numel() for value in initial_state.values())
+                mfu = estimate_mfu(
+                    num_parameters=params,
+                    global_tokens_per_second=global_tokens / elapsed,
+                    peak_tflops_per_gpu=peak_tflops,
+                    world_size=context.world_size,
+                )
+                print(f"estimated MFU={mfu:.2%}")
+    finally:
+        cleanup_distributed()
+
+
+def check_scaffold() -> None:
+    config = Config()
+    model = TokenClassifier(config)
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    print("Ex8 scaffold: PASS")
+    print(f"torch.distributed available={dist.is_available()}")
+    print(f"toy parameters={parameter_count:,}")
+    print("M1 can run a 2-process Gloo smoke test only after TODOs are filled.")
+    for todo_id in TODO_IDS:
+        print(f"  - {todo_id}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("check")
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument(
+        "--strategy",
+        choices=("manual", "ddp", "fsdp"),
+        required=True,
+    )
+    run_parser.add_argument("--peak-tflops", type=float)
+    run_parser.add_argument("--hidden-size", type=int, default=Config.hidden_size)
+    run_parser.add_argument(
+        "--micro-batch-size",
+        type=int,
+        default=Config.micro_batch_size,
+    )
+    run_parser.add_argument(
+        "--sequence-length",
+        type=int,
+        default=Config.sequence_length,
+    )
+    run_parser.add_argument("--steps", type=int, default=Config.steps)
+    args = parser.parse_args()
+    if args.command == "check":
+        check_scaffold()
+    else:
+        run(
+            args.strategy,
+            args.peak_tflops,
+            Config(
+                hidden_size=args.hidden_size,
+                micro_batch_size=args.micro_batch_size,
+                sequence_length=args.sequence_length,
+                steps=args.steps,
+            ),
+        )
+
+
+if __name__ == "__main__":
+    main()

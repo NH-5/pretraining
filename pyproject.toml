@@ -1,0 +1,12 @@
+[project]
+name = "pretraining"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "torch>=2.13.0",
+]
+
+[tool.uv]
+# 脚本集合仓库:各练习是 exercises/exNN_.../train.py,本仓库本身不作为包发布。
+# package = false → uv sync 只装依赖,不会去 build / 安装根项目。
+package = false

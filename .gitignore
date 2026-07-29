@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 实验产物(checkpoint / 采样输出 / 日志)
+*.pt
+*.ckpt
+*.safetensors
+out/
+runs/
+wandb/
+
+# 下载的语料切片(由练习脚本拉取,不入库)
+data/
+
+# OS
+.DS_Store

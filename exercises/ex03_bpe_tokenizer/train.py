@@ -1,0 +1,142 @@
+"""Ex3: train configurable byte-level BPE tokenizers and compare languages."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Any
+
+from utils import RatioRow, format_table, load_tokenizer, measure, require_tokenizers
+
+
+TODO_IDS = ("EX03_BUILD_BPE", "EX03_INTERPRET_RATIO")
+SAMPLES = {
+    "English": (
+        "A language model predicts the next token from the tokens that came before it."
+    ),
+    "中文": "语言模型根据前面的词元预测下一个词元，并从大量文本中学习规律。",
+}
+
+
+class _CharacterTokenizerForCheck:
+    """A dependency-free fake used only to verify reporting code."""
+
+    class Encoding:
+        def __init__(self, ids: list[int]) -> None:
+            self.ids = ids
+
+    def encode(self, text: str) -> "_CharacterTokenizerForCheck.Encoding":
+        return self.Encoding(list(range(len(text))))
+
+
+def train_byte_level_bpe(
+    corpus_files: list[Path],
+    *,
+    vocab_size: int,
+    output_path: Path,
+) -> Path:
+    """Train and save one Hugging Face byte-level BPE tokenizer."""
+    require_tokenizers()
+    if vocab_size < 259:
+        raise ValueError(
+            "Byte-level BPE vocab_size must fit 256 bytes plus bos/eos/pad."
+        )
+    missing = [path for path in corpus_files if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing corpus files: {missing}")
+
+    # TODO(你)[EX03_BUILD_BPE]: 见指南 §5.2、§5.3。
+    #   方向:组合 Tokenizer(BPE)、ByteLevel pre-tokenizer/decoder 和 BpeTrainer。
+    #   结构:特殊 token 至少包含 <bos>/<eos>/<pad>；vocab_size 来自参数。
+    #   完成标准:保存 tokenizer.json，任意 UTF-8 文本 encode→decode 可往返。
+    raise NotImplementedError("TODO[EX03_BUILD_BPE]")
+
+
+def compare_tokenizers(specs: list[tuple[str, Path]]) -> list[RatioRow]:
+    rows: list[RatioRow] = []
+    for name, path in specs:
+        tokenizer = load_tokenizer(path)
+        for language, text in SAMPLES.items():
+            rows.append(
+                measure(
+                    tokenizer,
+                    tokenizer_name=name,
+                    language=language,
+                    text=text,
+                )
+            )
+    return rows
+
+
+def interpret_ratio(rows: list[RatioRow]) -> str:
+    """Summarize the sequence-length/embedding trade-off seen in the table."""
+    # TODO(你)[EX03_INTERPRET_RATIO]: 见指南 §5.3。
+    #   比较至少两个 vocab_size，并分别解释中英文 chars/token 的变化。
+    #   完成标准:结论同时提到序列长度成本和 V*d embedding 参数成本。
+    raise NotImplementedError("TODO[EX03_INTERPRET_RATIO]")
+
+
+def parse_spec(value: str) -> tuple[str, Path]:
+    name, separator, raw_path = value.partition("=")
+    if not separator or not name or not raw_path:
+        raise argparse.ArgumentTypeError("Use NAME=/path/to/tokenizer.json")
+    return name, Path(raw_path)
+
+
+def check_scaffold() -> None:
+    fake = _CharacterTokenizerForCheck()
+    rows = [
+        measure(fake, tokenizer_name="character", language=language, text=text)
+        for language, text in SAMPLES.items()
+    ]
+    table = format_table(rows)
+    if "chars/token" not in table:
+        raise RuntimeError("Comparison table wiring failed.")
+    print("Ex3 scaffold: PASS")
+    print(table)
+    print("Optional dependency is intentionally not imported in check mode.")
+    for todo_id in TODO_IDS:
+        print(f"  - {todo_id}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("check")
+
+    train_parser = subparsers.add_parser("train")
+    train_parser.add_argument("--corpus", type=Path, nargs="+", required=True)
+    train_parser.add_argument("--vocab-size", type=int, required=True)
+    train_parser.add_argument("--output", type=Path, required=True)
+
+    compare_parser = subparsers.add_parser("compare")
+    compare_parser.add_argument(
+        "--tokenizer",
+        type=parse_spec,
+        action="append",
+        required=True,
+        help="Repeat NAME=/path/tokenizer.json for each vocabulary.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.command == "check":
+        check_scaffold()
+    elif args.command == "train":
+        saved = train_byte_level_bpe(
+            args.corpus,
+            vocab_size=args.vocab_size,
+            output_path=args.output,
+        )
+        print(f"Saved tokenizer to {saved}")
+    else:
+        rows = compare_tokenizers(args.tokenizer)
+        print(format_table(rows))
+        print("\nInterpretation:")
+        print(interpret_ratio(rows))
+
+
+if __name__ == "__main__":
+    main()

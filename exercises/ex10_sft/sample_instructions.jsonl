@@ -1,0 +1,8 @@
+{"split":"train","instruction":"Reply with one word: What color is grass?","response":"green"}
+{"split":"train","instruction":"Say the opposite of hot.","response":"cold"}
+{"split":"train","instruction":"Complete the sequence: A B C","response":"D"}
+{"split":"train","instruction":"Make cat plural.","response":"cats"}
+{"split":"train","instruction":"Reply yes or no: Is fire hot?","response":"yes"}
+{"split":"train","instruction":"Name the first month.","response":"January"}
+{"split":"eval","instruction":"Say the opposite of up.","response":"down"}
+{"split":"eval","instruction":"Complete the sequence: D E F","response":"G"}
