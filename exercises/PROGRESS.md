@@ -2,7 +2,7 @@
 
 Ex0 ✅ — 2026-07-29 — PyTorch 2.13.0；CUDA=False；MPS=True；Apple M1 / 16 GB 统一内存；张量测试 PASS — M1 使用统一内存，不能误报成 CUDA 独立显存。
 
-Ex1 ⏳ — 脚手架已备好 — 等待 causal mask、逐 token loss、自回归生成与 `loss < 1.5` 实测。
+Ex1 ⏳ — 2026-07-30 — 三个核心检查 PASS；M1 20-step loss `4.2070→3.3297`（9.4 s），样本不再单字符坍缩 — 等待完整训练达到 `loss < 1.5` 并抽查莎翁式文本。
 
 Ex2 ⏳ — 脚手架已备好 — 等待三项脱离代码的口述验收。
 

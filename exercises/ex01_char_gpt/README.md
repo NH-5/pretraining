@@ -20,6 +20,18 @@ uv run python exercises/ex01_char_gpt/train.py prepare
 uv run python exercises/ex01_char_gpt/train.py train
 ```
 
+`check` 是公开判题器，可以在每完成一个 TODO 后重复运行：
+
+- `PASS`：该项的 shape、数值语义和关键边界检查通过；
+- `PENDING`：仍抛出原始 `NotImplementedError`；
+- `FAIL`：实现已执行，但违反某条验收性质，后面会给具体原因。
+
+因此不需要先猜“正确输出长什么样”，也不需要每写一项就询问。`check` 不会给出核心实现，只验证外部行为。
+生成项还会验证长序列的 `block_size` 裁剪，以及高/低 temperature 下采样分布
+确实发生变化，避免只凭输出长度误把 greedy argmax 当成完整实现。
+脚手架还会检查随机初始化 loss 是否接近 `ln(V)`，防止 tied embedding/head
+因初始化尺度过大而在训练前就让 logits 饱和。
+
 本机先使用 M1 MPS + fp32。只有实测不能在十分钟内达到目标，才保持同一配置迁移到云 CUDA；迁移时不要同时改 batch、模型大小和学习率，否则无法归因。
 
 ## 验收标准

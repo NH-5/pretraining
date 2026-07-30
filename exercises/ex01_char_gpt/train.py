@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
@@ -22,11 +23,6 @@ from utils import (
 )
 
 
-TODO_IDS = (
-    "EX01_CAUSAL_MASK",
-    "EX01_TOKEN_LOSS",
-    "EX01_AUTOREGRESSIVE_GENERATION",
-)
 DEFAULT_DATA_PATH = Path(__file__).parent / "data" / "input.txt"
 
 
@@ -54,7 +50,12 @@ def build_causal_mask(sequence_length: int, device: torch.device) -> torch.Tenso
     #   方向:第 t 行只能保留位置 0..t，未来位置必须被屏蔽。
     #   结构:返回 bool 张量；True 表示可见，形状可为 [T, T]。
     #   完成标准:对 T=4 画出矩阵，并断言任意 j>i 的元素均为 False。
-    raise NotImplementedError("TODO[EX01_CAUSAL_MASK]")
+
+    C = torch.tril(
+        torch.ones(sequence_length, sequence_length, dtype=torch.bool, device=device)
+    )
+
+    return C
 
 
 class CausalSelfAttention(nn.Module):
@@ -140,7 +141,18 @@ class CharGPT(nn.Module):
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.n_layer))
         self.final_norm = nn.LayerNorm(config.n_embd)
         self.language_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.apply(self._initialize_weights)
         self.language_head.weight = self.token_embedding.weight
+
+    @staticmethod
+    def _initialize_weights(module: nn.Module) -> None:
+        """Keep initial logits unsaturated for stable next-token learning."""
+        # 见指南 §3.3、§7.2：weight tying 会让 embedding 同时充当
+        # unembedding，因此必须使用小尺度初始化，避免初始时极端偏向复制输入。
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            nn.init.zeros_(module.bias)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         _, sequence_length = token_ids.shape
@@ -162,7 +174,15 @@ def forward_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     #   方向:这是 B*T 个 V 分类，不是每句只算一个 loss。
     #   结构:logits=[B,T,V]，targets=[B,T]；先对齐成损失函数需要的形状。
     #   完成标准:标量 loss 可反传，打乱 targets 后 loss 应明显变差。
-    raise NotImplementedError("TODO[EX01_TOKEN_LOSS]")
+
+    V = logits.shape[2]
+
+    loss = F.cross_entropy(
+        logits.reshape(-1, V),
+        targets.reshape(-1)
+    )
+
+    return loss
 
 
 @torch.no_grad()
@@ -178,15 +198,209 @@ def generate(
     #   方向:训练能并行算 T 个位置；生成必须一次追加一个 token。
     #   结构:每步裁到 block_size，取最后位置 logits，采样后拼回序列。
     #   完成标准:输出长度=输入长度+max_new_tokens，且前缀保持不变。
-    raise NotImplementedError("TODO[EX01_AUTOREGRESSIVE_GENERATION]")
+
+    model.eval()
+
+    for _ in range(max_new_tokens):
+        context = prompt[:, - model.block_size:]
+        logits = model(context)
+
+        logits = logits[:, -1,:]
+        logits = logits / temperature
+
+        probabilities = F.softmax(logits, dim=-1)
+        next_token = torch.multinomial(probabilities, num_samples=1)
+
+        prompt = torch.cat(
+            [prompt, next_token],
+            dim=1
+        )
+
+    return prompt
 
 
 def count_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
 
 
+def _check_causal_mask() -> str:
+    """Validate shape, dtype, diagonal visibility, and absence of future leakage."""
+    mask = build_causal_mask(4, torch.device("cpu"))
+    expected = torch.tensor(
+        [
+            [True, False, False, False],
+            [True, True, False, False],
+            [True, True, True, False],
+            [True, True, True, True],
+        ]
+    )
+    if mask.shape != (4, 4):
+        raise AssertionError(f"expected shape (4, 4), got {tuple(mask.shape)}")
+    if mask.dtype != torch.bool:
+        raise AssertionError(f"expected torch.bool, got {mask.dtype}")
+    if mask.device.type != "cpu":
+        raise AssertionError(f"expected requested cpu device, got {mask.device}")
+    if not torch.equal(mask, expected):
+        raise AssertionError(f"unexpected T=4 mask:\n{mask.to(torch.int8)}")
+    if torch.triu(mask, diagonal=1).any():
+        raise AssertionError("future leakage detected above the diagonal")
+    return "T=4 mask:\n" + str(mask.to(torch.int8))
+
+
+def _check_token_loss() -> str:
+    """Check that every token position contributes to one differentiable scalar."""
+    logits = torch.tensor(
+        [
+            [
+                [8.0, -8.0, -8.0],
+                [-8.0, 8.0, -8.0],
+                [-8.0, -8.0, 8.0],
+            ]
+        ],
+        requires_grad=True,
+    )
+    targets = torch.tensor([[0, 1, 2]])
+    loss = forward_loss(logits, targets)
+    if loss.ndim != 0:
+        raise AssertionError(f"loss must be scalar, got shape {tuple(loss.shape)}")
+    if not torch.isfinite(loss):
+        raise AssertionError(f"loss must be finite, got {loss.item()}")
+    if loss.item() >= 1e-4:
+        raise AssertionError(f"near-perfect predictions should have tiny loss, got {loss.item()}")
+
+    loss.backward()
+    if logits.grad is None:
+        raise AssertionError("loss.backward() produced no logits gradient")
+    positions_with_gradient = logits.grad.abs().sum(dim=-1) > 0
+    if not positions_with_gradient.all():
+        raise AssertionError(
+            "every token position must contribute gradient, got "
+            f"{positions_with_gradient.tolist()}"
+        )
+
+    one_position_wrong = torch.tensor([[1, 1, 2]])
+    wrong_loss = forward_loss(logits.detach(), one_position_wrong)
+    if wrong_loss.item() <= 1.0:
+        raise AssertionError(
+            "changing an earlier target barely changed loss; "
+            "you may only be supervising the final position"
+        )
+    return f"perfect_loss={loss.item():.6g}, one_wrong_loss={wrong_loss.item():.6g}"
+
+
+class _DeterministicNextTokenModel(nn.Module):
+    """A test double whose next token is always (current token + 1) mod V."""
+
+    block_size = 4
+    vocab_size = 5
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if token_ids.shape[1] > self.block_size:
+            raise AssertionError(
+                "generate must crop its context to model.block_size before forward"
+            )
+        batch_size, sequence_length = token_ids.shape
+        logits = torch.full(
+            (batch_size, sequence_length, self.vocab_size),
+            fill_value=-100.0,
+            device=token_ids.device,
+        )
+        next_ids = ((token_ids + 1) % self.vocab_size).unsqueeze(-1)
+        return logits.scatter(dim=-1, index=next_ids, value=100.0)
+
+
+class _TemperatureProbeModel(nn.Module):
+    """A test double with a controllable two-token sampling distribution."""
+
+    block_size = 4
+    vocab_size = 2
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length = token_ids.shape
+        logits = torch.zeros(
+            batch_size,
+            sequence_length,
+            self.vocab_size,
+            device=token_ids.device,
+        )
+        logits[:, :, 0] = 2.0
+        return logits
+
+
+def _check_generation() -> str:
+    """Validate prefix preservation, context cropping, and one-token-at-a-time append."""
+    model = _DeterministicNextTokenModel()
+    prompt = torch.tensor([[0, 1]], dtype=torch.long)
+    torch.manual_seed(0)
+    generated = generate(
+        model,  # type: ignore[arg-type]
+        prompt,
+        max_new_tokens=5,
+        temperature=1.0,
+    )
+    expected = torch.tensor([[0, 1, 2, 3, 4, 0, 1]])
+    if generated.shape != expected.shape:
+        raise AssertionError(
+            f"expected output shape {tuple(expected.shape)}, got {tuple(generated.shape)}"
+        )
+    if not torch.equal(generated, expected):
+        raise AssertionError(
+            f"expected sequence {expected.tolist()}, got {generated.tolist()}"
+        )
+    if not torch.equal(generated[:, : prompt.shape[1]], prompt):
+        raise AssertionError("generation changed the original prompt")
+
+    probe_model = _TemperatureProbeModel()
+    repeated_prompt = torch.zeros(256, 1, dtype=torch.long)
+    torch.manual_seed(123)
+    hot = generate(
+        probe_model,  # type: ignore[arg-type]
+        repeated_prompt,
+        max_new_tokens=1,
+        temperature=100.0,
+    )
+    torch.manual_seed(123)
+    cold = generate(
+        probe_model,  # type: ignore[arg-type]
+        repeated_prompt,
+        max_new_tokens=1,
+        temperature=0.1,
+    )
+    hot_alternatives = int((hot[:, -1] == 1).sum().item())
+    cold_alternatives = int((cold[:, -1] == 1).sum().item())
+    if not 80 <= hot_alternatives <= 176:
+        raise AssertionError(
+            "high temperature should retain sampling diversity; "
+            f"got token-1 count {hot_alternatives}/256 "
+            "(argmax or ignored temperature is likely)"
+        )
+    if cold_alternatives > 5:
+        raise AssertionError(
+            "low temperature should concentrate samples on the top token; "
+            f"got token-1 count {cold_alternatives}/256"
+        )
+    return (
+        f"generated={generated.tolist()}; "
+        f"temperature probe hot/cold token-1={hot_alternatives}/{cold_alternatives}"
+    )
+
+
+def _run_learning_target_check(
+    todo_id: str,
+    check: Callable[[], str],
+) -> tuple[str, str]:
+    """Return PASS/PENDING/FAIL without confusing an untouched TODO with a bug."""
+    try:
+        detail = check()
+    except NotImplementedError:
+        return "PENDING", "implementation still raises NotImplementedError"
+    except Exception as error:
+        return "FAIL", f"{type(error).__name__}: {error}"
+    return "PASS", str(detail)
+
+
 def check_scaffold() -> None:
-    """Validate all non-TODO wiring without revealing an implementation."""
+    """Validate scaffold wiring and automatically judge completed learning targets."""
     sample = "To be, or not to be."
     tokenizer = CharTokenizer.from_text(sample)
     encoded = tokenizer.encode(sample)
@@ -199,13 +413,62 @@ def check_scaffold() -> None:
         n_layer=2,
         n_embd=64,
     )
+    torch.manual_seed(config.seed)
     model = CharGPT(config)
+    generator = torch.Generator().manual_seed(config.seed)
+    probe_inputs = torch.randint(
+        0,
+        config.vocab_size,
+        (4, config.block_size),
+        generator=generator,
+    )
+    probe_targets = torch.randint(
+        0,
+        config.vocab_size,
+        (4, config.block_size),
+        generator=generator,
+    )
+    model.eval()
+    with torch.no_grad():
+        probe_logits = model(probe_inputs)
+        initial_loss = F.cross_entropy(
+            probe_logits.reshape(-1, config.vocab_size),
+            probe_targets.reshape(-1),
+        ).item()
+    expected_initial_loss = math.log(config.vocab_size)
+    if not math.isfinite(initial_loss) or abs(
+        initial_loss - expected_initial_loss
+    ) > 0.5:
+        raise RuntimeError(
+            "Model initialization produced saturated logits: "
+            f"loss={initial_loss:.4f}, expected near ln(V)={expected_initial_loss:.4f}."
+        )
     print("Ex1 scaffold: PASS")
     print(f"Tokenizer vocabulary: {tokenizer.vocab_size}")
     print(f"Model parameters: {count_parameters(model):,}")
-    print("Unresolved learning targets:")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    print(
+        f"Initial random-token loss: {initial_loss:.4f} "
+        f"(ln(V)={expected_initial_loss:.4f})"
+    )
+    print("\nLearning-target checks:")
+    checks = (
+        ("EX01_CAUSAL_MASK", _check_causal_mask),
+        ("EX01_TOKEN_LOSS", _check_token_loss),
+        ("EX01_AUTOREGRESSIVE_GENERATION", _check_generation),
+    )
+    counts = {"PASS": 0, "PENDING": 0, "FAIL": 0}
+    for todo_id, check in checks:
+        status, detail = _run_learning_target_check(todo_id, check)
+        counts[status] += 1
+        print(f"[{status}] {todo_id}")
+        for line in detail.splitlines():
+            print(f"  {line}")
+    print(
+        "\nSummary: "
+        f"{counts['PASS']} passed, {counts['PENDING']} pending, {counts['FAIL']} failed"
+    )
+    if counts["FAIL"]:
+        raise RuntimeError("One or more learning-target checks failed.")
 
 
 def train(config: TrainConfig, data_path: Path) -> None:
@@ -243,7 +506,7 @@ def train(config: TrainConfig, data_path: Path) -> None:
             loss = forward_loss(model(inputs), targets)
         loss.backward()
         optimizer.step()
-        if step == 1 or step % config.log_interval == 0:
+        if step == 1 or step % config.log_interval == 0 or step == config.max_steps:
             print(f"step={step:04d} train_loss={loss.item():.4f}")
 
     model.eval()
