@@ -2,6 +2,9 @@
 
 对应指南 §10.1、§10.3。PPL 是同一分词器下平均交叉熵的指数变换；真正能续训的 checkpoint 必须保存模型、优化器、调度器、step、随机状态，以及能重建模型和 tokenizer 的 metadata，而不只是权重。
 
+建议按 [HINTS.md](HINTS.md) 的依赖图逐项完成；其中 checkpoint 部分先填写
+“保存/恢复行李清单”，再写代码。
+
 ```bash
 uv run python exercises/ex04_eval_checkpoint/train.py check
 uv run python exercises/ex04_eval_checkpoint/train.py demo

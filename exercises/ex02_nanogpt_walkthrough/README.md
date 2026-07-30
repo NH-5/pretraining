@@ -2,6 +2,9 @@
 
 对应指南 §3 与 §6。本练习不是再写一遍 Transformer，而是把 Ex1 的代码路径压缩成三条可口述的不变量。
 
+不知道该怎样组织口述时，按三张口述卡使用 [HINTS.md](HINTS.md)，不要照抄；
+最终仍要关掉文件脱稿说明。
+
 ```bash
 uv run python exercises/ex02_nanogpt_walkthrough/train.py check
 uv run python exercises/ex02_nanogpt_walkthrough/train.py trace

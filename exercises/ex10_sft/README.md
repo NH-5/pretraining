@@ -2,6 +2,9 @@
 
 对应指南 §11。预训练决定底模能力，SFT 用固定的“指令 → 回答”格式把能力导向可用行为；它不是重新注入基础知识。
 
+[HINTS.md](HINTS.md) 把本题拆成“无需 checkpoint 的三项”与“底模接线的两项”，
+并提供右移后的 response-label 对齐表。
+
 ## 前置条件
 
 先完成 Ex1 的模型/生成与 Ex4 的可恢复 checkpoint。`model_adapter.py` 故意不替你猜 checkpoint 结构，而要求复用自己已经验证的版本。

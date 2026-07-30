@@ -2,6 +2,9 @@
 
 对应指南 §9。本练习先手写一次 gradient all-reduce 理解 DP 语义，再使用 DDP，最后用 FSDP 观察参数、梯度和优化器状态分片。
 
+[HINTS.md](HINTS.md) 先画 rank/collective 时间线与单卡等价数据图，再逐级给
+控制流提示。遇到挂起时优先检查所有 rank 的 collective 次序。
+
 ## 本机与云端边界
 
 M1 只能用两个 CPU 进程 + Gloo 做结构 smoke test，不能冒充“2 卡验收”。正式验收必须租用同节点 2+ CUDA GPU；DDP/FSDP 使用 NCCL。

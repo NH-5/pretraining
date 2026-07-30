@@ -2,6 +2,9 @@
 
 对应指南 §3.3。先复用 Ex1 已验证的 causal attention 与逐 token loss，再只替换一个现代组件，其他模型、数据、步数、随机种子和优化器保持不变。
 
+[HINTS.md](HINTS.md) 为 RoPE、SwiGLU、GQA 分别给出 shape 工作表与常见错误；
+只阅读你选择的组件部分。
+
 ```bash
 uv run python exercises/ex09_modern_component/train.py check
 uv run python exercises/ex09_modern_component/train.py compare --component rope

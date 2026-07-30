@@ -2,6 +2,9 @@
 
 对应指南 §8 与 §9.4。这里不是背一个数字，而是把单位从参数/token 推到 FLOPs、秒、GPU·天与 MFU，并检查量纲和单调关系。
 
+[HINTS.md](HINTS.md) 把四个公式拆成单位阶梯、手算锚点和单调性检查；
+先让单位相消，再写表达式。
+
 ```bash
 uv run python exercises/ex06_scaling_math/train.py check
 uv run python exercises/ex06_scaling_math/train.py self-test

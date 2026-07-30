@@ -2,6 +2,9 @@
 
 对应指南 §7.2–§7.4 与 §10.2。本练习一次只比较一个变量：学习率曲线、是否 warmup、精度或累积步数，不能同时改。
 
+[HINTS.md](HINTS.md) 提供 scheduler 端点表和 gradient accumulation 时间线。
+先在纸上确定端点/更新次数，再填函数。
+
 ```bash
 uv run python exercises/ex05_training_stability/train.py check
 uv run python exercises/ex05_training_stability/train.py run --precision fp32
