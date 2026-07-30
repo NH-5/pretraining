@@ -3,7 +3,9 @@ name = "pretraining"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "numpy>=2.5.1",
     "torch>=2.13.0",
+    "torchvision>=0.28.0",
 ]
 
 [tool.uv]
