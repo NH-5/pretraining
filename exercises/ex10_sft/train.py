@@ -4,29 +4,32 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import math
 from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
 
 import torch
 from torch import nn
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, ManualCheck, SkipCheck, run_checks
 from model_adapter import BaseArtifacts, load_base_artifacts
 from utils import (
     Batch,
+    IGNORE_INDEX,
     InstructionExample,
     collate,
     encode_example,
     format_instruction,
     load_examples,
+    response_only_labels,
 )
 
 
-TODO_IDS = (
-    "EX10_FORMAT_INSTRUCTION",
-    "EX10_RESPONSE_LOSS_MASK",
-    "EX10_LOAD_BASE_MODEL",
-    "EX10_RESPONSE_ONLY_LOSS",
-    "EX10_SAVE_SFT",
-)
 DEFAULT_DATA = Path(__file__).with_name("sample_instructions.jsonl")
 
 
@@ -164,16 +167,155 @@ def run_sft(
     )
 
 
-def check_scaffold(data_path: Path) -> None:
+def _check_sample_data(data_path: Path) -> str:
     examples = load_examples(data_path)
     splits = {example.split for example in examples}
     if not {"train", "eval"}.issubset(splits):
         raise RuntimeError("Sample data must contain train and eval splits.")
-    print("Ex10 scaffold: PASS")
-    print(f"sample examples={len(examples)}")
-    print("The sample is intentionally tiny; it validates wiring, not general ability.")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    return (
+        f"sample examples={len(examples)}; train/eval splits present; "
+        "this validates wiring, not general instruction-following ability"
+    )
+
+
+def _check_instruction_format() -> None:
+    example = InstructionExample(
+        split="train",
+        instruction="把下面一句话改成过去时。",
+        response="模型完成了改写。",
+    )
+    prompt, response = format_instruction(example)
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise RuntimeError("format_instruction must return a non-empty prompt string.")
+    if not isinstance(response, str) or not response.strip():
+        raise RuntimeError("format_instruction must return a non-empty response string.")
+    if example.instruction not in prompt:
+        raise RuntimeError("The formatted prompt lost the instruction text.")
+    if example.response not in response:
+        raise RuntimeError("The formatted response lost the reference answer.")
+    raise ManualCheck(
+        "Prompt/response boundary is structurally valid. Confirm the identical "
+        "prompt template is used for both SFT training and inference."
+    )
+
+
+def _check_response_mask() -> str:
+    next_tokens = [11, 12, 13, 14, 15]
+    labels = response_only_labels(next_tokens, prompt_token_count=4)
+    expected = [IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 14, 15]
+    if labels != expected:
+        raise RuntimeError(
+            "4-token prompt alignment is wrong: "
+            f"expected {expected}, got {labels}."
+        )
+    if response_only_labels([21, 22], prompt_token_count=1) != [21, 22]:
+        raise RuntimeError("A 1-token prompt should leave both shifted targets visible.")
+    return f"next_tokens={next_tokens} -> labels={labels}"
+
+
+def _check_response_only_loss() -> str:
+    labels = torch.tensor(
+        [[IGNORE_INDEX, IGNORE_INDEX, 2, 1, 3]],
+        dtype=torch.long,
+    )
+    logits = torch.zeros(1, 5, 4, requires_grad=True)
+    loss = response_only_loss(logits, labels)
+    if loss.ndim != 0 or not torch.isfinite(loss):
+        raise RuntimeError("Response-only loss must be one finite scalar.")
+    if not math.isclose(loss.item(), math.log(4.0), rel_tol=1e-6):
+        raise RuntimeError(
+            "Zero logits over 4 classes should have loss ln(4) when averaging "
+            "only the 3 supervised response positions."
+        )
+    loss.backward()
+    if logits.grad is None:
+        raise RuntimeError("Response-only loss did not create logits gradients.")
+    if torch.any(logits.grad[:, :2, :] != 0):
+        raise RuntimeError("Ignored prompt positions contributed gradients.")
+    if not torch.all(logits.grad[:, 2:, :].abs().sum(dim=-1) > 0):
+        raise RuntimeError("Every supervised response position needs a gradient.")
+
+    good_logits = torch.full((1, 5, 4), -4.0)
+    for position in range(2, 5):
+        good_logits[0, position, labels[0, position]] = 4.0
+    changed_prompt_logits = good_logits.clone()
+    changed_prompt_logits[:, :2, :] = torch.tensor(
+        [[[100.0, -100.0, 50.0, -50.0], [-80.0, 90.0, -70.0, 60.0]]]
+    )
+    good_loss = response_only_loss(good_logits, labels)
+    changed_prompt_loss = response_only_loss(changed_prompt_logits, labels)
+    if not torch.allclose(good_loss, changed_prompt_loss, rtol=0.0, atol=0.0):
+        raise RuntimeError("Changing masked prompt logits changed the scalar loss.")
+    wrong_labels = labels.clone()
+    wrong_labels[0, 2] = 0
+    wrong_loss = response_only_loss(good_logits, wrong_labels)
+    if not wrong_loss > good_loss:
+        raise RuntimeError("A wrong supervised response target should increase loss.")
+    return "prompt gradients=0; response gradients>0; masked logits do not change loss"
+
+
+def _load_artifacts_for_check(checkpoint: Path | None) -> BaseArtifacts:
+    if checkpoint is None:
+        raise SkipCheck(
+            "Pass --checkpoint /path/to/completed-ex4.pt to validate the base adapter."
+        )
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    return load_base_artifacts(checkpoint, device=torch.device("cpu"))
+
+
+def _check_base_adapter(checkpoint: Path | None) -> None:
+    artifacts = _load_artifacts_for_check(checkpoint)
+    if not isinstance(artifacts.model, nn.Module):
+        raise RuntimeError("BaseArtifacts.model must be a torch.nn.Module.")
+    for attribute in ("pad_id", "eos_id", "encode", "decode"):
+        if not hasattr(artifacts.tokenizer, attribute):
+            raise RuntimeError(f"Tokenizer adapter lacks {attribute}.")
+    if not callable(artifacts.generate_text):
+        raise RuntimeError("BaseArtifacts.generate_text must be callable.")
+    raise ManualCheck(
+        "Base model/tokenizer/generator loaded. Compare generation before and "
+        "after loading with the same seed to finish the resume check."
+    )
+
+
+def _check_sft_checkpoint(checkpoint: Path | None) -> None:
+    artifacts = _load_artifacts_for_check(checkpoint)
+    optimizer = torch.optim.AdamW(artifacts.model.parameters(), lr=1e-4)
+    with TemporaryDirectory(prefix="ex10-check-") as temporary_directory:
+        output_path = Path(temporary_directory) / "sft.pt"
+        save_sft_checkpoint(
+            output_path,
+            artifacts=artifacts,
+            optimizer=optimizer,
+            epoch=3,
+        )
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("save_sft_checkpoint did not create a non-empty file.")
+    raise ManualCheck(
+        "SFT checkpoint file was created. Load it in a new process and compare "
+        "generation to verify model/tokenizer/base-source metadata."
+    )
+
+
+def check_scaffold(data_path: Path, checkpoint: Path | None) -> None:
+    run_checks(
+        "Ex10 learning-target checks:",
+        [
+            CheckCase("sample data wiring", lambda: _check_sample_data(data_path)),
+            CheckCase("EX10_FORMAT_INSTRUCTION", _check_instruction_format),
+            CheckCase("EX10_RESPONSE_LOSS_MASK", _check_response_mask),
+            CheckCase("EX10_RESPONSE_ONLY_LOSS", _check_response_only_loss),
+            CheckCase(
+                "EX10_LOAD_BASE_MODEL",
+                lambda: _check_base_adapter(checkpoint),
+            ),
+            CheckCase(
+                "EX10_SAVE_SFT",
+                lambda: _check_sft_checkpoint(checkpoint),
+            ),
+        ],
+    )
 
 
 def main() -> None:
@@ -181,6 +323,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser("check")
     check_parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    check_parser.add_argument("--checkpoint", type=Path)
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -189,7 +332,7 @@ def main() -> None:
     run_parser.add_argument("--epochs", type=int, default=SFTConfig.epochs)
     args = parser.parse_args()
     if args.command == "check":
-        check_scaffold(args.data)
+        check_scaffold(args.data, args.checkpoint)
     else:
         run_sft(
             checkpoint=args.checkpoint,

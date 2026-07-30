@@ -36,6 +36,10 @@ uv run python exercises/ex07_data_pipeline/train.py run \
   --fuzzy --fuzzy-audit out/fuzzy_removed_pairs.jsonl
 ```
 
+`check` 会自动验收规范化、保序 exact dedup；质量规则运行后仍标
+`MANUAL`，要求你抽查误杀。未做可选 fuzzy dedup 时显示 `SKIP`，不会阻塞
+必做部分。
+
 ## 你要完成
 
 - 一条可解释、可单独归因的质量过滤规则；

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from answers import (
     CAUSAL_MASK_EXPLANATION,
     TOKEN_LOSS_EXPLANATION,
     TRAIN_VS_INFERENCE_EXPLANATION,
 )
+from exercises.checking import CheckCase, ManualCheck, PendingCheck, run_checks
 
 
 @dataclass(frozen=True)
@@ -51,15 +58,55 @@ def unresolved_answers() -> list[str]:
     return [todo_id for todo_id, answer in answers.items() if not answer.strip()]
 
 
-def check_scaffold() -> None:
+def _check_training_trace() -> str:
     trace = build_training_trace(("A", "B", "C", "D"))
     if [len(row.visible_prefix) for row in trace] != [1, 2, 3]:
         raise RuntimeError("Training trace wiring is incorrect.")
-    print("Ex2 scaffold: PASS")
-    pending = unresolved_answers()
-    print(f"Unresolved explanations: {len(pending)}")
-    for todo_id in pending:
-        print(f"  - {todo_id}")
+    if [row.next_token_target for row in trace] != ["B", "C", "D"]:
+        raise RuntimeError("Next-token targets are not aligned with their prefixes.")
+    return "prefix lengths=[1, 2, 3]; targets=['B', 'C', 'D']"
+
+
+def _review_explanation(todo_id: str, answer: str, guide_section: str) -> None:
+    if not answer.strip():
+        raise PendingCheck(f"Fill {todo_id} in answers.py; see guide {guide_section}.")
+    raise ManualCheck(
+        f"Written answer found ({len(answer.strip())} characters). "
+        "Explain it aloud without reading; semantic correctness needs human review."
+    )
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex2 learning-target checks:",
+        [
+            CheckCase("training trace wiring", _check_training_trace),
+            CheckCase(
+                "EX02_EXPLAIN_CAUSAL_MASK",
+                lambda: _review_explanation(
+                    "EX02_EXPLAIN_CAUSAL_MASK",
+                    CAUSAL_MASK_EXPLANATION,
+                    "§3.1",
+                ),
+            ),
+            CheckCase(
+                "EX02_EXPLAIN_TOKEN_LOSS",
+                lambda: _review_explanation(
+                    "EX02_EXPLAIN_TOKEN_LOSS",
+                    TOKEN_LOSS_EXPLANATION,
+                    "§6.1、§6.3",
+                ),
+            ),
+            CheckCase(
+                "EX02_EXPLAIN_TRAIN_VS_INFERENCE",
+                lambda: _review_explanation(
+                    "EX02_EXPLAIN_TRAIN_VS_INFERENCE",
+                    TRAIN_VS_INFERENCE_EXPLANATION,
+                    "§6.3",
+                ),
+            ),
+        ],
+    )
 
 
 def verify_answers() -> None:

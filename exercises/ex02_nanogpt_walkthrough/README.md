@@ -7,6 +7,10 @@ uv run python exercises/ex02_nanogpt_walkthrough/train.py check
 uv run python exercises/ex02_nanogpt_walkthrough/train.py trace
 ```
 
+`check` 会逐项显示三份答案的状态：空白时是 `PENDING`；填写后是
+`MANUAL`，提醒你脱稿口述。trace 的前缀/目标对齐由脚本自动判为
+`PASS` 或 `FAIL`。
+
 在 [answers.py](answers.py) 用自己的话填写三个 TODO，再运行：
 
 ```bash
@@ -20,4 +24,4 @@ uv run python exercises/ex02_nanogpt_walkthrough/train.py verify
 - [ ] 不看代码口述训练并行、推理自回归；
 - [ ] 能用 `To be or not to be` 的 trace 指出每个位置的可见前缀和目标。
 
-这里的脚本只能检查答案是否存在；“我能否口述”必须由你亲自判断，不能由自动化测试冒充。
+脚本不会用关键词冒充语义评分；“我能否口述”必须由你亲自判断。

@@ -4,28 +4,27 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import copy
 from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
 
 import torch
 from torch import nn
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, run_checks
 from utils import (
     evaluate_average_loss,
     load_training_checkpoint,
     next_token_loss,
     perplexity_from_loss,
     save_training_checkpoint,
-)
-
-
-TODO_IDS = (
-    "EX04_REUSE_TOKEN_LOSS",
-    "EX04_EVAL_AVERAGE",
-    "EX04_PERPLEXITY",
-    "EX04_SAVE_CHECKPOINT",
-    "EX04_LOAD_CHECKPOINT",
 )
 
 
@@ -111,7 +110,7 @@ def new_training_state(
     return model, optimizer, scheduler
 
 
-def check_scaffold() -> None:
+def _check_training_state_wiring() -> str:
     config = DemoConfig()
     torch.manual_seed(config.seed)
     model, optimizer, scheduler = new_training_state(config)
@@ -119,10 +118,191 @@ def check_scaffold() -> None:
         raise RuntimeError("Training state was not constructed.")
     if scheduler.get_last_lr()[0] != config.learning_rate:
         raise RuntimeError("Scheduler wiring is incorrect.")
-    print("Ex4 scaffold: PASS")
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    return f"model parameters={sum(p.numel() for p in model.parameters()):,}"
+
+
+def _check_next_token_loss() -> str:
+    logits = torch.zeros(1, 4, 5, requires_grad=True)
+    targets = torch.tensor([[0, 1, 2, 3]])
+    loss = next_token_loss(logits, targets)
+    if loss.ndim != 0 or not torch.isfinite(loss):
+        raise RuntimeError("Loss must be one finite scalar.")
+    loss.backward()
+    if logits.grad is None:
+        raise RuntimeError("Loss did not create logits gradients.")
+    position_gradient = logits.grad.abs().sum(dim=-1)
+    if not torch.all(position_gradient > 0):
+        raise RuntimeError("Every token position must contribute a gradient.")
+
+    good_logits = torch.full((1, 4, 5), -4.0)
+    good_logits.scatter_(-1, targets.unsqueeze(-1), 4.0)
+    wrong_targets = targets.clone()
+    wrong_targets[0, 1] = 4
+    good_loss = next_token_loss(good_logits, targets)
+    wrong_loss = next_token_loss(good_logits, wrong_targets)
+    if not wrong_loss > good_loss:
+        raise RuntimeError("Making one token target wrong should increase loss.")
+    return (
+        f"scalar loss={loss.item():.6f}; all 4 positions have gradients; "
+        "wrong target raises loss"
+    )
+
+
+def _check_evaluation() -> str:
+    config = DemoConfig(
+        vocab_size=7,
+        embedding_size=8,
+        batch_size=2,
+        sequence_length=4,
+    )
+    torch.manual_seed(config.seed)
+    model = TinyNextTokenModel(config)
+    model.train()
+    parameters_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+    }
+    factory = make_batch_factory(config, seed_offset=400)
+    first = evaluate_average_loss(model, factory, num_batches=3)
+    second = evaluate_average_loss(model, factory, num_batches=3)
+    if not isinstance(first, float) or not math.isfinite(first):
+        raise RuntimeError("Evaluation must return one finite Python float.")
+    if first != second:
+        raise RuntimeError(f"Deterministic evaluation changed: {first} != {second}.")
+    if not model.training:
+        raise RuntimeError("Evaluation did not restore the model's training mode.")
+    for name, parameter in model.named_parameters():
+        if not torch.equal(parameter, parameters_before[name]):
+            raise RuntimeError(f"Evaluation changed parameter {name}.")
+    model.eval()
+    third = evaluate_average_loss(model, factory, num_batches=3)
+    if model.training:
+        raise RuntimeError("Evaluation changed a model that was already in eval mode.")
+    if third != first:
+        raise RuntimeError("Evaluation result depends on the model's incoming mode.")
+    return f"repeatable average loss={first:.6f}; mode and parameters restored"
+
+
+def _check_perplexity() -> str:
+    at_zero = perplexity_from_loss(0.0)
+    at_log_two = perplexity_from_loss(math.log(2.0))
+    at_one = perplexity_from_loss(1.0)
+    if not math.isclose(at_zero, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise RuntimeError(f"loss=0 must produce PPL=1, got {at_zero}.")
+    if not math.isclose(at_log_two, 2.0, rel_tol=1e-12):
+        raise RuntimeError(f"loss=ln(2) must produce PPL=2, got {at_log_two}.")
+    if not at_one > at_zero:
+        raise RuntimeError("Perplexity must increase when average loss increases.")
+    return "loss=0 -> PPL=1; loss=ln(2) -> PPL=2; monotonicity passed"
+
+
+def _assert_nested_equal(actual: object, expected: object, path: str) -> None:
+    if isinstance(expected, torch.Tensor):
+        if not isinstance(actual, torch.Tensor) or not torch.equal(actual, expected):
+            raise RuntimeError(f"Checkpoint state differs at {path}.")
+        return
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict) or actual.keys() != expected.keys():
+            raise RuntimeError(f"Checkpoint mapping differs at {path}.")
+        for key in expected:
+            _assert_nested_equal(actual[key], expected[key], f"{path}.{key}")
+        return
+    if isinstance(expected, (list, tuple)):
+        if not isinstance(actual, type(expected)) or len(actual) != len(expected):
+            raise RuntimeError(f"Checkpoint sequence differs at {path}.")
+        for index, (actual_item, expected_item) in enumerate(
+            zip(actual, expected, strict=True)
+        ):
+            _assert_nested_equal(actual_item, expected_item, f"{path}[{index}]")
+        return
+    if actual != expected:
+        raise RuntimeError(
+            f"Checkpoint value differs at {path}: {actual!r} != {expected!r}."
+        )
+
+
+def _check_checkpoint_round_trip() -> str:
+    torch.manual_seed(404)
+    model = nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.8)
+    features = torch.tensor([[1.0, -2.0, 0.5], [0.5, 1.5, -1.0]])
+    optimizer.zero_grad(set_to_none=True)
+    model(features).square().mean().backward()
+    optimizer.step()
+    scheduler.step()
+
+    expected_model = {
+        name: value.detach().clone() for name, value in model.state_dict().items()
+    }
+    expected_optimizer = copy.deepcopy(optimizer.state_dict())
+    expected_scheduler = copy.deepcopy(scheduler.state_dict())
+    metadata = {
+        "model_type": "Linear",
+        "config": {"in_features": 3, "out_features": 2},
+        "tokenizer_vocab": ["a", "b", "c"],
+    }
+    rng_at_save = torch.get_rng_state().clone()
+
+    with TemporaryDirectory(prefix="ex04-check-") as temporary_directory:
+        checkpoint_path = Path(temporary_directory) / "nested" / "resume.pt"
+        save_training_checkpoint(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            step=7,
+            validation_loss=1.25,
+            metadata=metadata,
+        )
+        if not checkpoint_path.is_file() or checkpoint_path.stat().st_size == 0:
+            raise RuntimeError("Checkpoint file was not created.")
+
+        torch.set_rng_state(rng_at_save)
+        expected_random = torch.rand(5)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.add_(10.0)
+        for state in optimizer.state.values():
+            for value in state.values():
+                if isinstance(value, torch.Tensor):
+                    value.add_(3.0)
+        optimizer.param_groups[0]["lr"] = 0.123
+        scheduler.step()
+        torch.manual_seed(999)
+
+        step, validation_loss, restored_metadata = load_training_checkpoint(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        actual_random = torch.rand(5)
+
+    _assert_nested_equal(model.state_dict(), expected_model, "model")
+    _assert_nested_equal(optimizer.state_dict(), expected_optimizer, "optimizer")
+    _assert_nested_equal(scheduler.state_dict(), expected_scheduler, "scheduler")
+    if step != 7 or validation_loss != 1.25 or restored_metadata != metadata:
+        raise RuntimeError("Checkpoint did not restore step/loss/metadata exactly.")
+    if not torch.equal(actual_random, expected_random):
+        raise RuntimeError("Checkpoint did not restore the CPU RNG state.")
+    return "model/optimizer/scheduler/step/metadata/CPU RNG round trip passed"
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex4 learning-target checks:",
+        [
+            CheckCase("training-state wiring", _check_training_state_wiring),
+            CheckCase("EX04_REUSE_TOKEN_LOSS", _check_next_token_loss),
+            CheckCase("EX04_EVAL_AVERAGE", _check_evaluation),
+            CheckCase("EX04_PERPLEXITY", _check_perplexity),
+            CheckCase(
+                "EX04_SAVE_CHECKPOINT / EX04_LOAD_CHECKPOINT",
+                _check_checkpoint_round_trip,
+            ),
+        ],
+    )
 
 
 def run_resume_demo(checkpoint_path: Path) -> None:

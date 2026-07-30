@@ -27,6 +27,11 @@ uv run python exercises/ex03_bpe_tokenizer/train.py compare \
   --tokenizer 16k=out/bpe-16k.json
 ```
 
+`check` 会用临时双语语料验证保存文件、special tokens 与 UTF-8
+encode→decode 往返。未安装 `tokenizers` 时该项显示 `SKIP`；安装后，
+未实现是 `PENDING`，实现错误才是 `FAIL`。词表权衡的文字结论会标成
+`MANUAL`，因为语义判断不能靠关键词代替。
+
 ## 你要完成
 
 - `EX03_BUILD_BPE`：组装、训练和保存 byte-level BPE；

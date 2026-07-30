@@ -12,10 +12,16 @@ Ex1 的原始字符词表没有 `<pad>/<eos>`。接线时必须显式增加 spec
 
 ```bash
 uv run python exercises/ex10_sft/train.py check
+uv run python exercises/ex10_sft/train.py check \
+  --checkpoint path/to/base.pt
 uv run python exercises/ex10_sft/train.py run \
   --checkpoint path/to/base.pt \
   --output out/sft.pt
 ```
+
+不带 checkpoint 时，格式/mask/loss 仍会独立检查，底模接线与 SFT 保存显示
+`SKIP`；完成 Ex4 checkpoint 后传入路径即可启用后两项。模板语义与新进程
+生成一致性最终标成 `MANUAL`，避免用文件存在冒充完整验收。
 
 ## 你要完成
 

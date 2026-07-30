@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import argparse
 import math
+from pathlib import Path
+import sys
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, run_checks
 from utils import format_quantity, parse_quantity
-
-
-TODO_IDS = (
-    "EX06_TRAINING_FLOPS",
-    "EX06_CHINCHILLA_TOKENS",
-    "EX06_GPU_DAYS",
-    "EX06_MFU",
-)
 
 
 def training_flops(num_parameters: float, num_tokens: float) -> float:
@@ -63,16 +62,98 @@ def validate_positive(name: str, value: float) -> None:
         raise ValueError(f"{name} must be finite and positive, got {value}.")
 
 
-def check_scaffold() -> None:
+def _check_quantity_parser() -> str:
     cases = {"7B": 7e9, "1.4T": 1.4e12, "3e20": 3e20}
     for text, expected in cases.items():
         actual = parse_quantity(text)
         if actual != expected:
             raise RuntimeError(f"Parser mismatch for {text}: {actual} != {expected}")
-    print("Ex6 scaffold: PASS")
-    print("Parser examples:", ", ".join(f"{key}={value:g}" for key, value in cases.items()))
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    return ", ".join(f"{key}={value:g}" for key, value in cases.items())
+
+
+def _check_training_flops() -> str:
+    actual = training_flops(1e9, 20e9)
+    expected = 1.2e20
+    if not math.isfinite(actual) or not math.isclose(
+        actual,
+        expected,
+        rel_tol=1e-12,
+    ):
+        raise RuntimeError(f"Expected 1.2e20 FLOPs, got {actual}.")
+    return f"N=1B, D=20B -> {actual:.3e} FLOPs"
+
+
+def _check_chinchilla_tokens() -> str:
+    actual = chinchilla_tokens(70e9)
+    expected = 1.4e12
+    if not math.isclose(actual, expected, rel_tol=1e-12):
+        raise RuntimeError(f"Expected 1.4T tokens for 70B parameters, got {actual}.")
+    return f"N=70B -> D={format_quantity(actual)}"
+
+
+def _check_gpu_days() -> str:
+    total_flops = 1.2e20
+    one_gpu = gpu_days(
+        total_flops,
+        peak_tflops_per_gpu=1000,
+        utilization=0.5,
+        num_gpus=1,
+    )
+    two_gpus = gpu_days(
+        total_flops,
+        peak_tflops_per_gpu=1000,
+        utilization=0.5,
+        num_gpus=2,
+    )
+    expected_one_gpu = 1.2e20 / (1000e12 * 0.5) / 86_400
+    if not math.isfinite(one_gpu) or one_gpu <= 0:
+        raise RuntimeError("GPU-day estimate must be finite and positive.")
+    if not math.isclose(one_gpu, expected_one_gpu, rel_tol=1e-12):
+        raise RuntimeError(
+            f"TFLOP/s or seconds/day conversion is incorrect: got {one_gpu}."
+        )
+    if not math.isclose(one_gpu, 2 * two_gpus, rel_tol=1e-12):
+        raise RuntimeError("Doubling GPU count must halve wall-clock days.")
+    return f"1 GPU={one_gpu:.6f} days; 2 GPUs={two_gpus:.6f} days"
+
+
+def _check_mfu() -> str:
+    actual = estimate_mfu(
+        num_parameters=1e9,
+        measured_tokens_per_second=100_000,
+        peak_tflops_per_gpu=1000,
+        num_gpus=1,
+    )
+    if not math.isclose(actual, 0.6, rel_tol=1e-12):
+        raise RuntimeError(f"Expected MFU=0.6, got {actual}.")
+    try:
+        impossible = estimate_mfu(
+            num_parameters=1e9,
+            measured_tokens_per_second=200_000,
+            peak_tflops_per_gpu=1000,
+            num_gpus=1,
+        )
+    except Exception:
+        pass
+    else:
+        raise RuntimeError(
+            "An impossible MFU input must raise instead of returning "
+            f"{impossible!r}."
+        )
+    return "100k token/s case -> MFU=60%; impossible >100% case rejected"
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex6 learning-target checks:",
+        [
+            CheckCase("quantity parser", _check_quantity_parser),
+            CheckCase("EX06_TRAINING_FLOPS", _check_training_flops),
+            CheckCase("EX06_CHINCHILLA_TOKENS", _check_chinchilla_tokens),
+            CheckCase("EX06_GPU_DAYS", _check_gpu_days),
+            CheckCase("EX06_MFU", _check_mfu),
+        ],
+    )
 
 
 def run_self_test() -> None:

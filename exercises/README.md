@@ -1,8 +1,9 @@
 # 预训练练习导航
 
-练习必须按顺序完成。`check` 只证明脚手架的非 TODO 部分可运行，不能替代每个目录 README 中的训练指标与口述验收。
+练习必须按顺序完成。每个 `train.py check` 都是可重复运行的公开行为判题器；
+它能检查 shape、数值和关键不变量，但不能替代每个目录 README 中的训练指标与口述验收。
 
-| 练习 | 主题 | 指南 | 当前核心 TODO |
+| 练习 | 主题 | 指南 | 初始核心 TODO |
 |---|---|---|---:|
 | Ex0 | PyTorch / CUDA / MPS 环境 | §7 | 0 |
 | Ex1 | char-level GPT | §3、§6、§7 | 3 |
@@ -22,11 +23,29 @@
 uv run python exercises/check_scaffolds.py
 ```
 
+总体检查只负责目录/入口是否完好；学习过程中应运行当前练习自己的
+`train.py check`，由该练习的公开判题器输出以下五种状态。你不需要事先猜
+完整标准输出；只需处理自己当前目标对应的状态和说明。
+
+统一状态含义：
+
+- `PASS`：自动行为测试通过；
+- `PENDING`：核心 TODO 尚未实现；
+- `FAIL`：代码已运行，但 shape、数值或不变量错误；
+- `SKIP`：当前缺少可选依赖、数据或云硬件；
+- `MANUAL`：自动结构检查已过，仍需口述或人工抽查。
+
+只有出现 `FAIL` 时命令才以非零状态退出；`PENDING / SKIP / MANUAL`
+都是学习过程中的正常状态。
+
 当前交付状态还可以额外验证所有预期 TODO 都保留着：
 
 ```bash
 uv run python exercises/check_scaffolds.py --expect-unfinished
 ```
+
+`--expect-unfinished` 只用于验收最初交付的空白脚手架。一旦开始填写 TODO，
+不要再把它当作学习进度判题器。
 
 ## 依赖何时加入
 

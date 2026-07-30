@@ -7,6 +7,10 @@ uv run python exercises/ex04_eval_checkpoint/train.py check
 uv run python exercises/ex04_eval_checkpoint/train.py demo
 ```
 
+可在每填一个函数后重复运行 `check`。它分别验证逐位置梯度、固定评估的
+可重复性、PPL 边界，以及 model/optimizer/scheduler/step/metadata/CPU RNG
+的 checkpoint 往返；无需先运行完整 demo 才知道哪一项错了。
+
 ## 你要完成
 
 - 从 Ex1 复用并再次解释逐 token loss；

@@ -10,6 +10,9 @@ uv run python exercises/ex06_scaling_math/train.py estimate \
   --peak-tflops 312 --utilization 0.45 --num-gpus 8
 ```
 
+`check` 会分别给四个公式显示 `PASS / PENDING / FAIL`，并检查单位换算、
+卡数翻倍关系和 MFU 不超过 100% 的边界；不必等四个 TODO 全写完才运行。
+
 ## 你要完成
 
 - `C≈6ND`；

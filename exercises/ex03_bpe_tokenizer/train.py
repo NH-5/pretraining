@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, ManualCheck, SkipCheck, run_checks
 from utils import RatioRow, format_table, load_tokenizer, measure, require_tokenizers
 
 
-TODO_IDS = ("EX03_BUILD_BPE", "EX03_INTERPRET_RATIO")
 SAMPLES = {
     "English": (
         "A language model predicts the next token from the tokens that came before it."
@@ -83,7 +89,7 @@ def parse_spec(value: str) -> tuple[str, Path]:
     return name, Path(raw_path)
 
 
-def check_scaffold() -> None:
+def _check_report_table() -> str:
     fake = _CharacterTokenizerForCheck()
     rows = [
         measure(fake, tokenizer_name="character", language=language, text=text)
@@ -92,11 +98,91 @@ def check_scaffold() -> None:
     table = format_table(rows)
     if "chars/token" not in table:
         raise RuntimeError("Comparison table wiring failed.")
-    print("Ex3 scaffold: PASS")
-    print(table)
-    print("Optional dependency is intentionally not imported in check mode.")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    return table
+
+
+def _check_bpe_round_trip() -> str:
+    try:
+        tokenizers = require_tokenizers()
+    except RuntimeError as error:
+        raise SkipCheck(str(error)) from error
+
+    with TemporaryDirectory(prefix="ex03-check-") as temporary_directory:
+        directory = Path(temporary_directory)
+        corpus_path = directory / "corpus.txt"
+        output_path = directory / "tokenizer.json"
+        corpus_path.write_text(
+            "\n".join(
+                [
+                    "A language model predicts the next token.",
+                    "Byte pair encoding learns reusable pieces.",
+                    "语言模型根据前面的词元预测下一个词元。",
+                    "分词方式会改变序列长度和词表大小。",
+                ]
+                * 8
+            ),
+            encoding="utf-8",
+        )
+        saved_path = Path(
+            train_byte_level_bpe(
+                [corpus_path],
+                vocab_size=300,
+                output_path=output_path,
+            )
+        )
+        if not saved_path.is_file() or saved_path.stat().st_size == 0:
+            raise RuntimeError("train_byte_level_bpe did not save a tokenizer file.")
+
+        tokenizer = tokenizers.Tokenizer.from_file(str(saved_path))
+        missing_specials = [
+            token
+            for token in ("<bos>", "<eos>", "<pad>")
+            if tokenizer.token_to_id(token) is None
+        ]
+        if missing_specials:
+            raise RuntimeError(f"Missing special tokens: {missing_specials}")
+        if tokenizer.get_vocab_size() > 300:
+            raise RuntimeError("Saved vocabulary exceeds the requested vocab_size=300.")
+
+        samples = (
+            "Hello, byte-level BPE!",
+            "中文与 English 可以一起往返。",
+            "spaces  and\nnewlines\tmust survive",
+        )
+        for text in samples:
+            restored = tokenizer.decode(tokenizer.encode(text).ids)
+            if restored != text:
+                raise RuntimeError(
+                    f"UTF-8 round trip changed text: {text!r} -> {restored!r}"
+                )
+    return "saved tokenizer.json; special tokens present; 3 UTF-8 round trips passed"
+
+
+def _check_interpretation() -> None:
+    rows = [
+        RatioRow("small", "English", characters=80, tokens=40),
+        RatioRow("small", "中文", characters=30, tokens=60),
+        RatioRow("large", "English", characters=80, tokens=24),
+        RatioRow("large", "中文", characters=30, tokens=26),
+    ]
+    explanation = interpret_ratio(rows)
+    if not isinstance(explanation, str) or not explanation.strip():
+        raise RuntimeError("interpret_ratio must return a non-empty explanation.")
+    raise ManualCheck(
+        f"Explanation found ({len(explanation.strip())} characters). "
+        "Check aloud that it covers sequence length and V*d embedding cost."
+    )
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex3 learning-target checks:",
+        [
+            CheckCase("comparison report wiring", _check_report_table),
+            CheckCase("EX03_BUILD_BPE", _check_bpe_round_trip),
+            CheckCase("EX03_INTERPRET_RATIO", _check_interpretation),
+        ],
+    )
 
 
 def parse_args() -> argparse.Namespace:

@@ -7,10 +7,17 @@ from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
+import sys
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, SkipCheck, run_checks
 from utils import (
     MicroBatch,
     TinyClassifier,
@@ -20,9 +27,6 @@ from utils import (
     precision_context,
     reset_peak_memory,
 )
-
-
-TODO_IDS = ("EX05_WARMUP_COSINE", "EX05_GRAD_ACCUMULATION")
 
 
 @dataclass(frozen=True)
@@ -132,9 +136,9 @@ def run_experiment(
     }
 
 
-def check_scaffold() -> None:
+def _check_micro_batch_wiring() -> str:
     config = ExperimentConfig()
-    device = choose_device()
+    device = torch.device("cpu")
     batches = make_micro_batches(
         step=0,
         count=config.accumulation_steps,
@@ -146,14 +150,172 @@ def check_scaffold() -> None:
     )
     if len(batches) != config.accumulation_steps:
         raise RuntimeError("Micro-batch factory failed.")
-    print("Ex5 scaffold: PASS")
-    print(f"device={device.type}; default precision=fp32")
-    print(
-        "global batch per optimizer step="
+    return (
+        f"{len(batches)} micro-batches; global batch="
         f"{config.micro_batch_size * config.accumulation_steps}"
     )
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+
+
+def _check_warmup_cosine() -> str:
+    config = replace(
+        ExperimentConfig(),
+        total_steps=20,
+        warmup_steps=4,
+        peak_learning_rate=1e-2,
+        min_lr_ratio=0.1,
+    )
+    learning_rates = [
+        warmup_cosine_lr(step, config) for step in range(config.total_steps + 1)
+    ]
+    if any(
+        not math.isfinite(rate)
+        or rate < 0
+        or rate > config.peak_learning_rate * (1.0 + 1e-12)
+        for rate in learning_rates
+    ):
+        raise RuntimeError("Learning rates must stay finite and within [0, peak].")
+    warmup = learning_rates[: config.warmup_steps + 1]
+    decay = learning_rates[config.warmup_steps :]
+    if any(left > right + 1e-12 for left, right in zip(warmup, warmup[1:])):
+        raise RuntimeError("Warmup learning rates must be non-decreasing.")
+    if any(left + 1e-12 < right for left, right in zip(decay, decay[1:])):
+        raise RuntimeError("Cosine-decay learning rates must be non-increasing.")
+    if learning_rates[0] >= config.peak_learning_rate:
+        raise RuntimeError("Warmup step 0 must start below the peak learning rate.")
+    if not math.isclose(
+        max(warmup),
+        config.peak_learning_rate,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError("Warmup must reach the configured peak learning rate.")
+    minimum = config.peak_learning_rate * config.min_lr_ratio
+    if not math.isclose(
+        learning_rates[-1],
+        minimum,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError("The schedule must reach peak_lr * min_lr_ratio.")
+
+    no_warmup = replace(config, warmup_steps=0)
+    if not math.isclose(
+        warmup_cosine_lr(0, no_warmup),
+        no_warmup.peak_learning_rate,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError("warmup_steps=0 must start at the peak learning rate.")
+    if not math.isclose(
+        warmup_cosine_lr(config.total_steps + 5, config),
+        minimum,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError("Steps beyond total_steps must stay at the minimum lr.")
+    return (
+        f"lr[0]={learning_rates[0]:.6g}, "
+        f"peak={max(warmup):.6g}, lr[20]={learning_rates[-1]:.6g}"
+    )
+
+
+def _check_gradient_accumulation() -> str:
+    torch.manual_seed(505)
+    device = torch.device("cpu")
+    candidate = TinyClassifier(6, 8, 3).to(device)
+    reference = TinyClassifier(6, 8, 3).to(device)
+    reference.load_state_dict(candidate.state_dict())
+    candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=0.05)
+    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.05)
+    micro_batches = make_micro_batches(
+        step=0,
+        count=3,
+        batch_size=4,
+        input_size=6,
+        num_classes=3,
+        device=device,
+        seed=505,
+    )
+    max_grad_norm = 0.4
+    reported_loss, reported_norm = gradient_accumulation_update(
+        candidate,
+        candidate_optimizer,
+        micro_batches,
+        device=device,
+        precision="fp32",
+        max_grad_norm=max_grad_norm,
+    )
+
+    features = torch.cat([batch.features for batch in micro_batches], dim=0)
+    labels = torch.cat([batch.labels for batch in micro_batches], dim=0)
+    reference_optimizer.zero_grad(set_to_none=True)
+    reference_loss = F.cross_entropy(reference(features), labels)
+    reference_loss.backward()
+    reference_norm = nn.utils.clip_grad_norm_(
+        reference.parameters(),
+        max_norm=max_grad_norm,
+    )
+    reference_optimizer.step()
+
+    if not math.isfinite(float(reported_loss)) or not math.isfinite(
+        float(reported_norm)
+    ):
+        raise RuntimeError("Accumulation must report finite loss and gradient norm.")
+    if not math.isclose(
+        float(reported_loss),
+        reference_loss.item(),
+        rel_tol=1e-6,
+        abs_tol=1e-7,
+    ):
+        raise RuntimeError(
+            "Reported micro-batch mean loss differs from the global-batch loss."
+        )
+    maximum_difference = max(
+        (left - right).abs().max().item()
+        for left, right in zip(
+            candidate.parameters(),
+            reference.parameters(),
+            strict=True,
+        )
+    )
+    if maximum_difference > 1e-6:
+        raise RuntimeError(
+            "Accumulated update differs from one global-batch update: "
+            f"max_abs_diff={maximum_difference:.3e}."
+        )
+    return (
+        f"global loss={reference_loss.item():.6f}; "
+        f"pre-clip grad norm={float(reference_norm):.6f}; "
+        f"parameter max_abs_diff={maximum_difference:.3e}"
+    )
+
+
+def _check_bf16_runtime() -> str:
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise SkipCheck(
+            "bf16 validation needs a CUDA GPU with bf16 support; "
+            "the local M1 path intentionally uses fp32."
+        )
+    device = torch.device("cuda")
+    model = TinyClassifier(8, 16, 4).to(device)
+    features = torch.randn(2, 8, device=device)
+    with precision_context(device, "bf16"):
+        output = model(features)
+    if output.dtype != torch.bfloat16:
+        raise RuntimeError(f"Expected bf16 output under autocast, got {output.dtype}.")
+    return "CUDA bf16 autocast produced bfloat16 activations"
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex5 learning-target checks:",
+        [
+            CheckCase("micro-batch wiring", _check_micro_batch_wiring),
+            CheckCase("EX05_WARMUP_COSINE", _check_warmup_cosine),
+            CheckCase("EX05_GRAD_ACCUMULATION + grad clip", _check_gradient_accumulation),
+            CheckCase("bf16 runtime", _check_bf16_runtime),
+        ],
+    )
 
 
 def main() -> None:

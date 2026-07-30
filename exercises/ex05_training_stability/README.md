@@ -7,6 +7,10 @@ uv run python exercises/ex05_training_stability/train.py check
 uv run python exercises/ex05_training_stability/train.py run --precision fp32
 ```
 
+`check` 会把 scheduler 和累积更新分别判定，并把累积结果与等价 global
+batch 更新比较。本机 M1 上 bf16 项固定显示 `SKIP`，这是硬件边界，不是
+代码失败。
+
 在支持 bf16 的云 CUDA 上，再单独运行：
 
 ```bash

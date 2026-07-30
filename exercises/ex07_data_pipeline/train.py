@@ -6,7 +6,13 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import sys
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, ManualCheck, SkipCheck, run_checks
 from utils import (
     Record,
     audit_sample,
@@ -15,13 +21,6 @@ from utils import (
     normalize_text,
     read_jsonl,
     write_jsonl,
-)
-
-
-TODO_IDS = (
-    "EX07_QUALITY_FILTER",
-    "EX07_EXACT_DEDUP",
-    "EX07_FUZZY_DEDUP",
 )
 
 
@@ -119,17 +118,104 @@ def run_pipeline(
     )
 
 
-def check_scaffold() -> None:
+def _check_normalization_and_audit() -> str:
     raw = "  Café\n\n  language   model  "
     if normalize_text(raw) != "Café language model":
         raise RuntimeError("Normalization check failed.")
     sample = [{"text": f"record {index}"} for index in range(10)]
-    if len(audit_sample(sample, count=5, seed=42)) != 5:
+    first = audit_sample(sample, count=5, seed=42)
+    second = audit_sample(sample, count=5, seed=42)
+    if len(first) != 5 or first != second:
         raise RuntimeError("Audit sampler failed.")
-    print("Ex7 scaffold: PASS")
-    print("Optional datasets/tokenizers dependencies are not imported in check mode.")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    return "NFC/whitespace normalization passed; seeded 5-record audit is repeatable"
+
+
+def _check_quality_filter() -> None:
+    examples: list[Record] = [
+        {"id": "empty", "text": ""},
+        {"id": "short", "text": "Short."},
+        {"id": "repeated", "text": "spam " * 40},
+        {
+            "id": "paragraph",
+            "text": (
+                "A language-model corpus should contain readable, useful prose "
+                "rather than accidental boilerplate."
+            ),
+        },
+    ]
+    decisions: list[str] = []
+    for record in examples:
+        decision = passes_quality_filter(record)
+        if type(decision) is not bool:
+            raise RuntimeError("passes_quality_filter must return bool for every record.")
+        decisions.append(f"{record['id']}={'keep' if decision else 'drop'}")
+    raise ManualCheck(
+        "The rule returned booleans for boundary examples: "
+        + ", ".join(decisions)
+        + ". Manually review false positives/negatives and record 3 keep + 3 drop cases."
+    )
+
+
+def _check_exact_deduplication() -> str:
+    records: list[Record] = [
+        {"id": "first-a", "text": "same text"},
+        {"id": "b", "text": "different"},
+        {"id": "second-a", "text": "same text"},
+        {"id": "third-a", "text": "same text"},
+        {"id": "c", "text": "last"},
+    ]
+    kept, removed = exact_deduplicate(records)
+    if removed != 2:
+        raise RuntimeError(f"Expected 2 exact duplicates removed, got {removed}.")
+    kept_ids = [record.get("id") for record in kept]
+    if kept_ids != ["first-a", "b", "c"]:
+        raise RuntimeError(
+            "Exact dedup must retain first-occurrence order; "
+            f"got ids={kept_ids}."
+        )
+    if len(records) != 5:
+        raise RuntimeError("exact_deduplicate must not mutate the input list.")
+    return "A,B,A,A,C -> A,B,C; removed=2; first-occurrence order preserved"
+
+
+def _check_optional_fuzzy_deduplication() -> None:
+    records: list[Record] = [
+        {"id": "a", "text": "The model predicts the next token from context."},
+        {"id": "a2", "text": "The model predicts a next token from context."},
+        {"id": "b", "text": "A completely unrelated document about gardens."},
+        {"id": "b2", "text": "A completely unrelated document about a garden."},
+    ]
+    try:
+        kept, audit = fuzzy_deduplicate(records)
+    except NotImplementedError as error:
+        raise SkipCheck(
+            "EX07_FUZZY_DEDUP is an optional extension; implement it only "
+            "after exact dedup is validated."
+        ) from error
+    if not isinstance(kept, list) or not isinstance(audit, list):
+        raise RuntimeError("Fuzzy dedup must return (kept_records, audit_records).")
+    required_audit_keys = {"kept_text", "removed_text", "similarity"}
+    for index, record in enumerate(audit):
+        if not isinstance(record, dict) or not required_audit_keys.issubset(record):
+            raise RuntimeError(
+                f"Fuzzy audit record {index} lacks {sorted(required_audit_keys)}."
+            )
+    raise ManualCheck(
+        f"Fuzzy dedup ran: kept={len(kept)}, audit_pairs={len(audit)}. "
+        "Inspect at least 3 exported pairs before accepting the threshold."
+    )
+
+
+def check_scaffold() -> None:
+    run_checks(
+        "Ex7 learning-target checks:",
+        [
+            CheckCase("normalization + audit wiring", _check_normalization_and_audit),
+            CheckCase("EX07_QUALITY_FILTER", _check_quality_filter),
+            CheckCase("EX07_EXACT_DEDUP", _check_exact_deduplication),
+            CheckCase("EX07_FUZZY_DEDUP (optional)", _check_optional_fuzzy_deduplication),
+        ],
+    )
 
 
 def main() -> None:

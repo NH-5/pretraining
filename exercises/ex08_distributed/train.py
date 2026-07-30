@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
+from io import StringIO
+import math
+import os
+from pathlib import Path
+import sys
 import time
 from typing import Any
 
@@ -13,19 +19,16 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from exercises.checking import CheckCase, SkipCheck, run_checks
 from utils import (
     DistributedContext,
     cleanup_distributed,
     initialize_distributed,
     peak_memory_mib,
-)
-
-
-TODO_IDS = (
-    "EX08_ALL_REDUCE",
-    "EX08_SINGLE_CARD_EQUIVALENCE",
-    "EX08_FSDP_WRAP",
-    "EX08_MFU",
 )
 
 
@@ -38,6 +41,9 @@ class Config:
     steps: int = 20
     learning_rate: float = 1e-2
     seed: int = 17
+
+
+_CHECK_CONTEXT: DistributedContext | None = None
 
 
 class TokenClassifier(nn.Module):
@@ -227,16 +233,164 @@ def run(
         cleanup_distributed()
 
 
-def check_scaffold() -> None:
+def _check_model_wiring() -> str:
     config = Config()
     model = TokenClassifier(config)
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
-    print("Ex8 scaffold: PASS")
-    print(f"torch.distributed available={dist.is_available()}")
-    print(f"toy parameters={parameter_count:,}")
-    print("M1 can run a 2-process Gloo smoke test only after TODOs are filled.")
-    for todo_id in TODO_IDS:
-        print(f"  - {todo_id}")
+    if not dist.is_available() or parameter_count <= 0:
+        raise RuntimeError("Distributed/model scaffold is unavailable.")
+    return f"torch.distributed available; toy parameters={parameter_count:,}"
+
+
+def _torchrun_context() -> DistributedContext:
+    if _CHECK_CONTEXT is not None:
+        return _CHECK_CONTEXT
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size < 2:
+        raise SkipCheck(
+            "Needs 2 processes. Run: uv run torchrun --nnodes=1 "
+            "--nproc-per-node=2 --master-addr=127.0.0.1 --master-port=29500 "
+            "exercises/ex08_distributed/train.py check"
+        )
+    raise RuntimeError("The multi-process check did not initialize its process group.")
+
+
+def _check_all_reduce() -> str:
+    context = _torchrun_context()
+    model = nn.Linear(1, 1, bias=False).to(context.device)
+    parameter = next(model.parameters())
+    parameter.grad = torch.tensor(
+        [[float(context.rank + 1)]],
+        device=context.device,
+    )
+    average_gradients(model, context.world_size)
+    expected = (context.world_size + 1) / 2
+    if parameter.grad is None or not torch.allclose(
+        parameter.grad,
+        torch.full_like(parameter.grad, expected),
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            f"Rank {context.rank} did not receive mean gradient {expected}."
+        )
+    dist.barrier()
+    return (
+        f"rank={context.rank}; world_size={context.world_size}; "
+        f"mean gradient={parameter.grad.item():.6f}"
+    )
+
+
+def _check_single_card_equivalence() -> str:
+    context = _torchrun_context()
+    config = Config(
+        hidden_size=8,
+        vocab_size=11,
+        micro_batch_size=2,
+        sequence_length=3,
+        steps=2,
+        learning_rate=1e-2,
+    )
+    torch.manual_seed(config.seed)
+    model: nn.Module = TokenClassifier(config).to(context.device)
+    initial_state = unwrap_state_dict(model)
+    model = wrap_ddp(model, context)
+    optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate)
+    for step in range(config.steps):
+        features, labels = make_local_batch(
+            config,
+            rank=context.rank,
+            step=step,
+            device=context.device,
+        )
+        optimizer.zero_grad(set_to_none=True)
+        F.cross_entropy(model(features), labels).backward()
+        optimizer.step()
+    difference = verify_against_single_card(
+        initial_state=initial_state,
+        distributed_model=model,
+        context=context,
+        config=config,
+    )
+    if not math.isfinite(difference) or difference > 1e-6:
+        raise RuntimeError(
+            "DDP differs from the equivalent global-batch reference: "
+            f"max_abs_diff={difference:.3e}."
+        )
+    return f"rank={context.rank}; reference max_abs_diff={difference:.3e}"
+
+
+def _check_fsdp_wrapper() -> str:
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        raise SkipCheck(
+            "FSDP validation needs a 2+ GPU CUDA machine; local M1/Gloo "
+            "can validate manual all-reduce and DDP only."
+        )
+    context = _torchrun_context()
+    from torch.distributed.fsdp import FullyShardedDataParallel
+
+    config = Config(
+        hidden_size=8,
+        vocab_size=11,
+        micro_batch_size=1,
+        sequence_length=2,
+        steps=1,
+    )
+    torch.manual_seed(config.seed)
+    model = wrap_fsdp(TokenClassifier(config).to(context.device), context)
+    if not isinstance(model, FullyShardedDataParallel):
+        raise RuntimeError("wrap_fsdp must return FullyShardedDataParallel.")
+    features, labels = make_local_batch(
+        config,
+        rank=context.rank,
+        step=0,
+        device=context.device,
+    )
+    F.cross_entropy(model(features), labels).backward()
+    dist.barrier()
+    return f"rank={context.rank}; FSDP forward/backward passed"
+
+
+def _check_mfu() -> str:
+    actual = estimate_mfu(
+        num_parameters=int(1e9),
+        global_tokens_per_second=100_000,
+        peak_tflops_per_gpu=1000,
+        world_size=1,
+    )
+    if not math.isclose(actual, 0.6, rel_tol=1e-12):
+        raise RuntimeError(f"Expected MFU=0.6, got {actual}.")
+    return "N=1B, 100k token/s, 1000 TFLOP/s -> MFU=60%"
+
+
+def check_scaffold() -> None:
+    global _CHECK_CONTEXT
+    if int(os.environ.get("WORLD_SIZE", "1")) >= 2:
+        _CHECK_CONTEXT = initialize_distributed()
+    output_context = (
+        redirect_stdout(StringIO())
+        if _CHECK_CONTEXT is not None and _CHECK_CONTEXT.rank != 0
+        else nullcontext()
+    )
+    try:
+        with output_context:
+            run_checks(
+                "Ex8 learning-target checks:",
+                [
+                    CheckCase("distributed model wiring", _check_model_wiring),
+                    CheckCase("EX08_ALL_REDUCE", _check_all_reduce),
+                    CheckCase(
+                        "EX08_SINGLE_CARD_EQUIVALENCE",
+                        _check_single_card_equivalence,
+                    ),
+                    CheckCase("EX08_FSDP_WRAP", _check_fsdp_wrapper),
+                    CheckCase("EX08_MFU", _check_mfu),
+                ],
+            )
+    finally:
+        if _CHECK_CONTEXT is not None:
+            cleanup_distributed()
+            _CHECK_CONTEXT = None
 
 
 def main() -> None:
