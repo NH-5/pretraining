@@ -32,7 +32,7 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex01_char_gpt",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         (
             "EX01_CAUSAL_MASK",
             "EX01_TOKEN_LOSS",
@@ -42,7 +42,7 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex02_nanogpt_walkthrough",
-        ("README.md", "train.py", "answers.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "answers.py", "notes.md"),
         (
             "EX02_EXPLAIN_CAUSAL_MASK",
             "EX02_EXPLAIN_TOKEN_LOSS",
@@ -52,13 +52,13 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex03_bpe_tokenizer",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         ("EX03_BUILD_BPE", "EX03_INTERPRET_RATIO"),
         ("check",),
     ),
     ExerciseContract(
         "ex04_eval_checkpoint",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         (
             "EX04_REUSE_TOKEN_LOSS",
             "EX04_EVAL_AVERAGE",
@@ -70,13 +70,13 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex05_training_stability",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         ("EX05_WARMUP_COSINE", "EX05_GRAD_ACCUMULATION"),
         ("check",),
     ),
     ExerciseContract(
         "ex06_scaling_math",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         (
             "EX06_TRAINING_FLOPS",
             "EX06_CHINCHILLA_TOKENS",
@@ -87,13 +87,20 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex07_data_pipeline",
-        ("README.md", "train.py", "utils.py", "prepare_data.py", "notes.md"),
+        (
+            "README.md",
+            "HINTS.md",
+            "train.py",
+            "utils.py",
+            "prepare_data.py",
+            "notes.md",
+        ),
         ("EX07_QUALITY_FILTER", "EX07_EXACT_DEDUP", "EX07_FUZZY_DEDUP"),
         ("check",),
     ),
     ExerciseContract(
         "ex08_distributed",
-        ("README.md", "train.py", "utils.py", "notes.md"),
+        ("README.md", "HINTS.md", "train.py", "utils.py", "notes.md"),
         (
             "EX08_ALL_REDUCE",
             "EX08_SINGLE_CARD_EQUIVALENCE",
@@ -104,7 +111,14 @@ CONTRACTS = (
     ),
     ExerciseContract(
         "ex09_modern_component",
-        ("README.md", "train.py", "model.py", "components.py", "notes.md"),
+        (
+            "README.md",
+            "HINTS.md",
+            "train.py",
+            "model.py",
+            "components.py",
+            "notes.md",
+        ),
         (
             "EX09_REUSE_CAUSAL_ATTENTION",
             "EX09_REUSE_TOKEN_LOSS",
@@ -118,6 +132,7 @@ CONTRACTS = (
         "ex10_sft",
         (
             "README.md",
+            "HINTS.md",
             "train.py",
             "utils.py",
             "model_adapter.py",

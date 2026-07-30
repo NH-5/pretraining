@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
+import sys
 
 
 class CheckStatus(StrEnum):
@@ -73,6 +75,21 @@ def run_checks(
         f"{counts[CheckStatus.SKIP]} skipped, "
         f"{counts[CheckStatus.MANUAL]} manual"
     )
+    needs_guidance = (
+        counts[CheckStatus.PENDING]
+        + counts[CheckStatus.FAIL]
+        + counts[CheckStatus.MANUAL]
+    )
+    hints_path = Path(sys.argv[0]).resolve().parent / "HINTS.md"
+    if needs_guidance and hints_path.is_file():
+        try:
+            shown_path = hints_path.relative_to(Path.cwd())
+        except ValueError:
+            shown_path = hints_path
+        print(
+            f"\n下一步提示：打开 {shown_path}，按 TODO ID 搜索；"
+            "每次只多看一档提示。"
+        )
     if counts[CheckStatus.FAIL]:
         raise RuntimeError("One or more public checks failed.")
     return counts
