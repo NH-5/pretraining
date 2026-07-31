@@ -178,6 +178,7 @@ def run_self_test() -> None:
     )
     if not math.isclose(one_gpu, 2 * two_gpu, rel_tol=1e-12):
         raise RuntimeError("GPU scaling check failed.")
+    _check_mfu()
     print("Ex6 formula self-test: PASS")
 
 

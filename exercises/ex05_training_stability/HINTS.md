@@ -59,6 +59,7 @@ decay_progress = （当前 decay 走了多少）/（decay 总长度）
 
 - warmup 的分母或端点差 1，峰值出现在错误 step；
 - cosine 从 step 0 开始，导致 warmup/decay 不连续；
+- 用直线连接 peak/minimum；端点和单调性虽正确，但 25%/75% 位置不符合 cosine；
 - 最低降到 0，忽略 `min_lr_ratio`；
 - `warmup_steps=0` 除零；
 - 超过 total steps 后 lr 再上升；

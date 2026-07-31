@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -50,6 +51,19 @@ class TinyNextTokenModel(nn.Module):
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.head(self.embedding(token_ids))
+
+
+class _EvaluationProbeModel(nn.Module):
+    """A dropout-bearing model that exposes missing eval-mode handling."""
+
+    def __init__(self, config: DemoConfig) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(config.vocab_size, config.embedding_size)
+        self.dropout = nn.Dropout(p=0.5)
+        self.head = nn.Linear(config.embedding_size, config.vocab_size)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.head(self.dropout(self.embedding(token_ids)))
 
 
 def make_batch_factory(
@@ -127,6 +141,12 @@ def _check_next_token_loss() -> str:
     loss = next_token_loss(logits, targets)
     if loss.ndim != 0 or not torch.isfinite(loss):
         raise RuntimeError("Loss must be one finite scalar.")
+    expected = math.log(5.0)
+    if not math.isclose(loss.item(), expected, rel_tol=1e-6, abs_tol=1e-7):
+        raise RuntimeError(
+            "Loss must be the mean over all token positions: "
+            f"uniform V=5 expected ln(5)={expected:.6f}, got {loss.item():.6f}."
+        )
     loss.backward()
     if logits.grad is None:
         raise RuntimeError("Loss did not create logits gradients.")
@@ -143,7 +163,7 @@ def _check_next_token_loss() -> str:
     if not wrong_loss > good_loss:
         raise RuntimeError("Making one token target wrong should increase loss.")
     return (
-        f"scalar loss={loss.item():.6f}; all 4 positions have gradients; "
+        f"mean loss=ln(5)={loss.item():.6f}; all 4 positions have gradients; "
         "wrong target raises loss"
     )
 
@@ -156,19 +176,41 @@ def _check_evaluation() -> str:
         sequence_length=4,
     )
     torch.manual_seed(config.seed)
-    model = TinyNextTokenModel(config)
+    model = _EvaluationProbeModel(config)
     model.train()
     parameters_before = {
         name: parameter.detach().clone()
         for name, parameter in model.named_parameters()
     }
     factory = make_batch_factory(config, seed_offset=400)
+
+    incoming_mode = model.training
+    model.eval()
+    expected_batch_losses: list[float] = []
+    with torch.no_grad():
+        for batch_index in range(3):
+            inputs, targets = factory(batch_index)
+            expected_batch_losses.append(
+                F.cross_entropy(
+                    model(inputs).reshape(-1, config.vocab_size),
+                    targets.reshape(-1),
+                    reduction="mean",
+                ).item()
+            )
+    model.train(incoming_mode)
+    expected = sum(expected_batch_losses) / len(expected_batch_losses)
+
     first = evaluate_average_loss(model, factory, num_batches=3)
     second = evaluate_average_loss(model, factory, num_batches=3)
     if not isinstance(first, float) or not math.isfinite(first):
         raise RuntimeError("Evaluation must return one finite Python float.")
-    if first != second:
+    if not math.isclose(first, second, rel_tol=0.0, abs_tol=1e-12):
         raise RuntimeError(f"Deterministic evaluation changed: {first} != {second}.")
+    if not math.isclose(first, expected, rel_tol=1e-7, abs_tol=1e-7):
+        raise RuntimeError(
+            "Evaluation must average all requested batches in eval mode: "
+            f"expected {expected:.9f}, got {first:.9f}."
+        )
     if not model.training:
         raise RuntimeError("Evaluation did not restore the model's training mode.")
     for name, parameter in model.named_parameters():
@@ -178,9 +220,12 @@ def _check_evaluation() -> str:
     third = evaluate_average_loss(model, factory, num_batches=3)
     if model.training:
         raise RuntimeError("Evaluation changed a model that was already in eval mode.")
-    if third != first:
+    if not math.isclose(third, first, rel_tol=0.0, abs_tol=1e-12):
         raise RuntimeError("Evaluation result depends on the model's incoming mode.")
-    return f"repeatable average loss={first:.6f}; mode and parameters restored"
+    return (
+        f"3-batch eval average={first:.6f}; dropout disabled; "
+        "incoming mode and parameters restored"
+    )
 
 
 def _check_perplexity() -> str:

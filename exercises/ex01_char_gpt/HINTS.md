@@ -69,6 +69,7 @@ uv run python exercises/ex01_char_gpt/train.py check
 - `logits` 是 `[B,T,V]`；
 - `targets` 是 `[B,T]`；
 - 返回一个可反传的标量；
+- 对全部 `B×T` 个分类取平均，不能求和后让 loss 随 batch/序列长度放大；
 - 每个 `(batch, position)` 都是一次 V 类分类，见指南 §6.1、§6.3。
 
 ### 先手工对齐
@@ -164,8 +165,10 @@ targets，然后交给普通多分类交叉熵。
 - 从所有 T 个位置一起采样；
 - 沿 batch 维拼接；
 - 每轮仍把原 prompt 喂给模型，没有接回新 token；
+- 每轮只喂最后一个 token，导致模型丢失仍在 `block_size` 内的上下文；
 - `max_new_tokens=0` 时仍生成一个 token；
 - 超过 `block_size` 后位置 embedding 越界。
+- 调用 `model.eval()` 后没有恢复进入函数前的 train/eval 模式。
 
 ## 如何根据 check 定位
 

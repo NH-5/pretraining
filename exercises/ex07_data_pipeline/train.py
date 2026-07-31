@@ -99,8 +99,14 @@ def run_pipeline(
         if fuzzy_audit_path is None:
             raise ValueError("--fuzzy requires --fuzzy-audit.")
         output_records, fuzzy_audit_records = fuzzy_deduplicate(exact_kept)
+        if len(output_records) > len(exact_kept):
+            raise ValueError(
+                "fuzzy_deduplicate returned more records than it received."
+            )
         write_jsonl(fuzzy_audit_path, fuzzy_audit_records)
-        fuzzy_removed = len(fuzzy_audit_records)
+        # One removed document can appear in more than one explanatory pair.
+        # Dataset cardinality, not audit-row cardinality, is the statistics contract.
+        fuzzy_removed = len(exact_kept) - len(output_records)
     else:
         output_records, fuzzy_removed = exact_kept, 0
 
@@ -179,11 +185,19 @@ def _check_exact_deduplication() -> str:
 
 
 def _check_optional_fuzzy_deduplication() -> None:
+    first_topic = (
+        "A language model predicts the next token from prior context while "
+        "training over many carefully filtered documents in one corpus."
+    )
+    second_topic = (
+        "A garden notebook records soil moisture, seasonal sunlight, pruning "
+        "dates, and seed choices for each vegetable bed."
+    )
     records: list[Record] = [
-        {"id": "a", "text": "The model predicts the next token from context."},
-        {"id": "a2", "text": "The model predicts a next token from context."},
-        {"id": "b", "text": "A completely unrelated document about gardens."},
-        {"id": "b2", "text": "A completely unrelated document about a garden."},
+        {"id": "a", "text": first_topic},
+        {"id": "a2", "text": first_topic + " Updated."},
+        {"id": "b", "text": second_topic},
+        {"id": "b2", "text": second_topic + " Revised."},
     ]
     try:
         kept, audit = fuzzy_deduplicate(records)
@@ -194,6 +208,11 @@ def _check_optional_fuzzy_deduplication() -> None:
         ) from error
     if not isinstance(kept, list) or not isinstance(audit, list):
         raise RuntimeError("Fuzzy dedup must return (kept_records, audit_records).")
+    if len(kept) >= len(records) or not audit:
+        raise RuntimeError(
+            "The fuzzy extension must identify at least one of the deliberately "
+            "near-duplicate probe pairs and emit its audit record."
+        )
     required_audit_keys = {"kept_text", "removed_text", "similarity"}
     for index, record in enumerate(audit):
         if not isinstance(record, dict) or not required_audit_keys.issubset(record):

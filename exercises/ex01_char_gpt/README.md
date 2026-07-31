@@ -30,8 +30,10 @@ uv run python exercises/ex01_char_gpt/train.py train
 - `FAIL`：实现已执行，但违反某条验收性质，后面会给具体原因。
 
 因此不需要先猜“正确输出长什么样”，也不需要每写一项就询问。`check` 不会给出核心实现，只验证外部行为。
-生成项还会验证长序列的 `block_size` 裁剪，以及高/低 temperature 下采样分布
-确实发生变化，避免只凭输出长度误把 greedy argmax 当成完整实现。
+mask 项还会用 T=7 与完整模型的“改变未来 token 不得影响此前 logits”不变量
+确认 mask 确实接入 attention。生成项会验证滚动上下文、`block_size` 裁剪、
+调用前后的 train/eval 模式，以及高/低 temperature 下采样分布确实发生变化，
+避免只凭输出长度误把 greedy argmax 当成完整实现。
 脚手架还会检查随机初始化 loss 是否接近 `ln(V)`，防止 tied embedding/head
 因初始化尺度过大而在训练前就让 logits 饱和。
 

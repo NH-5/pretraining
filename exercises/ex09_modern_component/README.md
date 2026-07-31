@@ -12,7 +12,7 @@ uv run python exercises/ex09_modern_component/train.py compare --component rope
 
 `check` 会分别测试复用的 causal attention、逐 token loss，以及三个组件的
 shape/梯度/因果边界。三选一完成后，另外两项保持 `PENDING` 是正常状态；
-只要所选项不是 `FAIL` 即可继续同配置 loss 对照。
+两项必做检查与所选组件必须显示 `PASS`，才可继续同配置 loss 对照。
 
 ## 必做与选做
 

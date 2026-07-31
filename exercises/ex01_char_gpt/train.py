@@ -199,24 +199,33 @@ def generate(
     #   结构:每步裁到 block_size，取最后位置 logits，采样后拼回序列。
     #   完成标准:输出长度=输入长度+max_new_tokens，且前缀保持不变。
 
+    if temperature <= 0:
+        raise ValueError("temperature must be positive.")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative.")
+
+    incoming_training_mode = model.training
     model.eval()
+    try:
+        for _ in range(max_new_tokens):
+            context = prompt[:, -model.block_size :]
+            logits = model(context)
 
-    for _ in range(max_new_tokens):
-        context = prompt[:, - model.block_size:]
-        logits = model(context)
+            logits = logits[:, -1, :]
+            logits = logits / temperature
 
-        logits = logits[:, -1,:]
-        logits = logits / temperature
+            probabilities = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probabilities, num_samples=1)
 
-        probabilities = F.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probabilities, num_samples=1)
-
-        prompt = torch.cat(
-            [prompt, next_token],
-            dim=1
-        )
-
-    return prompt
+            prompt = torch.cat(
+                [prompt, next_token],
+                dim=1,
+            )
+        return prompt
+    finally:
+        # Sampling can also happen during training; do not silently disable dropout
+        # for every subsequent optimizer step.
+        model.train(incoming_training_mode)
 
 
 def count_parameters(model: nn.Module) -> int:
@@ -224,31 +233,93 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def _check_causal_mask() -> str:
-    """Validate shape, dtype, diagonal visibility, and absence of future leakage."""
-    mask = build_causal_mask(4, torch.device("cpu"))
-    expected = torch.tensor(
-        [
-            [True, False, False, False],
-            [True, True, False, False],
-            [True, True, True, False],
-            [True, True, True, True],
-        ]
+    """Validate the mask contract and its use by the complete attention path."""
+    rendered_t4: torch.Tensor | None = None
+    for sequence_length in (4, 7):
+        mask = build_causal_mask(sequence_length, torch.device("cpu"))
+        expected = torch.tril(
+            torch.ones(sequence_length, sequence_length, dtype=torch.bool)
+        )
+        if mask.dtype != torch.bool:
+            raise AssertionError(f"expected torch.bool, got {mask.dtype}")
+        if mask.device.type != "cpu":
+            raise AssertionError(f"expected requested cpu device, got {mask.device}")
+        try:
+            expanded = torch.broadcast_to(
+                mask,
+                (2, 3, sequence_length, sequence_length),
+            )
+        except RuntimeError as error:
+            raise AssertionError(
+                "mask must be broadcastable to attention scores [B,H,T,T], "
+                f"got shape {tuple(mask.shape)} for T={sequence_length}"
+            ) from error
+        expected_expanded = expected.expand_as(expanded)
+        if not torch.equal(expanded, expected_expanded):
+            raise AssertionError(
+                f"unexpected T={sequence_length} mask:\n"
+                f"{expanded[0, 0].to(torch.int8)}"
+            )
+        if sequence_length == 4:
+            rendered_t4 = expanded[0, 0]
+
+    # A correct helper is not enough if the attention path forgets to apply it.
+    # Changing future tokens must not alter any earlier model logits.
+    config = replace(
+        TrainConfig(),
+        vocab_size=10,
+        block_size=6,
+        n_layer=2,
+        n_head=2,
+        n_embd=16,
+        dropout=0.0,
     )
-    if mask.shape != (4, 4):
-        raise AssertionError(f"expected shape (4, 4), got {tuple(mask.shape)}")
-    if mask.dtype != torch.bool:
-        raise AssertionError(f"expected torch.bool, got {mask.dtype}")
-    if mask.device.type != "cpu":
-        raise AssertionError(f"expected requested cpu device, got {mask.device}")
-    if not torch.equal(mask, expected):
-        raise AssertionError(f"unexpected T=4 mask:\n{mask.to(torch.int8)}")
-    if torch.triu(mask, diagonal=1).any():
-        raise AssertionError("future leakage detected above the diagonal")
-    return "T=4 mask:\n" + str(mask.to(torch.int8))
+    torch.manual_seed(611)
+    model = CharGPT(config).eval()
+    original = torch.tensor([[1, 2, 3, 4, 5, 6]])
+    changed_future = torch.tensor([[1, 2, 3, 7, 8, 9]])
+    with torch.no_grad():
+        original_logits = model(original)
+        changed_logits = model(changed_future)
+    if not torch.allclose(
+        original_logits[:, :3],
+        changed_logits[:, :3],
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        maximum_difference = (
+            original_logits[:, :3] - changed_logits[:, :3]
+        ).abs().max().item()
+        raise AssertionError(
+            "the complete attention path leaked future tokens into earlier logits: "
+            f"max_abs_diff={maximum_difference:.3e}"
+        )
+    assert rendered_t4 is not None
+    return (
+        "T=4 mask:\n"
+        + str(rendered_t4.to(torch.int8))
+        + "\nT=7 and full-model future-invariance checks passed"
+    )
 
 
 def _check_token_loss() -> str:
     """Check that every token position contributes to one differentiable scalar."""
+    uniform_logits = torch.zeros(2, 3, 5)
+    uniform_targets = torch.tensor([[0, 1, 2], [3, 4, 0]])
+    uniform_loss = forward_loss(uniform_logits, uniform_targets)
+    expected_uniform_loss = math.log(5.0)
+    if not math.isclose(
+        uniform_loss.item(),
+        expected_uniform_loss,
+        rel_tol=1e-6,
+        abs_tol=1e-7,
+    ):
+        raise AssertionError(
+            "forward_loss must average over all B*T token positions: "
+            f"uniform V=5 expected ln(5)={expected_uniform_loss:.6f}, "
+            f"got {uniform_loss.item():.6f}"
+        )
+
     logits = torch.tensor(
         [
             [
@@ -285,27 +356,35 @@ def _check_token_loss() -> str:
             "changing an earlier target barely changed loss; "
             "you may only be supervising the final position"
         )
-    return f"perfect_loss={loss.item():.6g}, one_wrong_loss={wrong_loss.item():.6g}"
+    return (
+        f"uniform_loss=ln(5)={uniform_loss.item():.6f}; "
+        f"perfect_loss={loss.item():.6g}; one_wrong_loss={wrong_loss.item():.6g}"
+    )
 
 
-class _DeterministicNextTokenModel(nn.Module):
-    """A test double whose next token is always (current token + 1) mod V."""
+class _ContextDependentNextTokenModel(nn.Module):
+    """A test double whose next token depends on the complete visible context."""
 
     block_size = 4
-    vocab_size = 5
+    vocab_size = 7
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_contexts: list[torch.Tensor] = []
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         if token_ids.shape[1] > self.block_size:
             raise AssertionError(
                 "generate must crop its context to model.block_size before forward"
             )
+        self.seen_contexts.append(token_ids.detach().cpu().clone())
         batch_size, sequence_length = token_ids.shape
         logits = torch.full(
             (batch_size, sequence_length, self.vocab_size),
             fill_value=-100.0,
             device=token_ids.device,
         )
-        next_ids = ((token_ids + 1) % self.vocab_size).unsqueeze(-1)
+        next_ids = token_ids.cumsum(dim=1).remainder(self.vocab_size).unsqueeze(-1)
         return logits.scatter(dim=-1, index=next_ids, value=100.0)
 
 
@@ -329,7 +408,7 @@ class _TemperatureProbeModel(nn.Module):
 
 def _check_generation() -> str:
     """Validate prefix preservation, context cropping, and one-token-at-a-time append."""
-    model = _DeterministicNextTokenModel()
+    model = _ContextDependentNextTokenModel()
     prompt = torch.tensor([[0, 1]], dtype=torch.long)
     torch.manual_seed(0)
     generated = generate(
@@ -338,7 +417,7 @@ def _check_generation() -> str:
         max_new_tokens=5,
         temperature=1.0,
     )
-    expected = torch.tensor([[0, 1, 2, 3, 4, 0, 1]])
+    expected = torch.tensor([[0, 1, 1, 2, 4, 1, 1]])
     if generated.shape != expected.shape:
         raise AssertionError(
             f"expected output shape {tuple(expected.shape)}, got {tuple(generated.shape)}"
@@ -349,6 +428,27 @@ def _check_generation() -> str:
         )
     if not torch.equal(generated[:, : prompt.shape[1]], prompt):
         raise AssertionError("generation changed the original prompt")
+    expected_contexts = (
+        torch.tensor([[0, 1]]),
+        torch.tensor([[0, 1, 1]]),
+        torch.tensor([[0, 1, 1, 2]]),
+        torch.tensor([[1, 1, 2, 4]]),
+        torch.tensor([[1, 2, 4, 1]]),
+    )
+    if len(model.seen_contexts) != len(expected_contexts) or any(
+        not torch.equal(actual, expected_context)
+        for actual, expected_context in zip(
+            model.seen_contexts,
+            expected_contexts,
+            strict=True,
+        )
+    ):
+        raise AssertionError(
+            "generate did not feed the complete rolling context window; got "
+            f"{[context.tolist() for context in model.seen_contexts]}"
+        )
+    if not model.training:
+        raise AssertionError("generate did not restore the model's incoming training mode")
 
     probe_model = _TemperatureProbeModel()
     repeated_prompt = torch.zeros(256, 1, dtype=torch.long)
@@ -379,8 +479,29 @@ def _check_generation() -> str:
             "low temperature should concentrate samples on the top token; "
             f"got token-1 count {cold_alternatives}/256"
         )
+    probe_model.eval()
+    generate(
+        probe_model,  # type: ignore[arg-type]
+        torch.zeros(1, 1, dtype=torch.long),
+        max_new_tokens=0,
+        temperature=1.0,
+    )
+    if probe_model.training:
+        raise AssertionError("generate changed a model that was already in eval mode")
+    try:
+        generate(
+            probe_model,  # type: ignore[arg-type]
+            torch.zeros(1, 1, dtype=torch.long),
+            max_new_tokens=1,
+            temperature=0.0,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("temperature <= 0 must be rejected")
     return (
         f"generated={generated.tolist()}; "
+        f"rolling context lengths={[context.shape[1] for context in model.seen_contexts]}; "
         f"temperature probe hot/cold token-1={hot_alternatives}/{cold_alternatives}"
     )
 

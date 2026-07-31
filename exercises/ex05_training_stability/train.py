@@ -213,9 +213,24 @@ def _check_warmup_cosine() -> str:
         abs_tol=1e-12,
     ):
         raise RuntimeError("Steps beyond total_steps must stay at the minimum lr.")
+
+    decay_span = config.total_steps - config.warmup_steps
+    for progress in (0.25, 0.75):
+        step = config.warmup_steps + round(decay_span * progress)
+        expected = minimum + 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        ) * (config.peak_learning_rate - minimum)
+        actual = learning_rates[step]
+        if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12):
+            raise RuntimeError(
+                "Decay has correct endpoints/monotonicity but is not cosine: "
+                f"progress={progress:.2f}, expected {expected:.12g}, "
+                f"got {actual:.12g}."
+            )
     return (
         f"lr[0]={learning_rates[0]:.6g}, "
-        f"peak={max(warmup):.6g}, lr[20]={learning_rates[-1]:.6g}"
+        f"peak={max(warmup):.6g}, lr[20]={learning_rates[-1]:.6g}; "
+        "25%/75% cosine anchors passed"
     )
 
 
@@ -269,6 +284,17 @@ def _check_gradient_accumulation() -> str:
     ):
         raise RuntimeError(
             "Reported micro-batch mean loss differs from the global-batch loss."
+        )
+    if not math.isclose(
+        float(reported_norm),
+        float(reference_norm),
+        rel_tol=1e-6,
+        abs_tol=1e-7,
+    ):
+        raise RuntimeError(
+            "Reported pre-clip gradient norm differs from the global-batch "
+            f"reference: expected {float(reference_norm):.9f}, "
+            f"got {float(reported_norm):.9f}."
         )
     maximum_difference = max(
         (left - right).abs().max().item()

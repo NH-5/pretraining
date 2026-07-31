@@ -179,5 +179,6 @@ repeat、expand 还是 group reshape，都检查 K/V 的复制只发生在 head 
 ## 公平对照
 
 所选组件的 check 通过后才运行 `compare`。固定 seed、数据、steps、optimizer、
-batch 和模型宽度；同时看最终 loss、末 20 步平均和参数量。一次差异不等于普遍
-结论，诚实写入 `notes.md`。
+batch 和模型宽度；同名且同 shape 的共享参数还必须从同一份 baseline state
+复制，不能把“重新设成同一个 seed”误当成共享初始化。同时看最终 loss、末 20 步
+平均和参数量。一次差异不等于普遍结论，诚实写入 `notes.md`。

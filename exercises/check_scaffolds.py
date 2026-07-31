@@ -161,7 +161,7 @@ def python_source(directory: Path) -> str:
 def check_contract(
     contract: ExerciseContract,
     *,
-    expect_unfinished: bool,
+    expect_all_todo_markers: bool,
     run_entry_points: bool,
 ) -> tuple[int, int]:
     directory = EXERCISES / contract.directory
@@ -178,7 +178,7 @@ def check_contract(
     unknown = set(found) - set(contract.todo_ids)
     if unknown:
         raise RuntimeError(f"{contract.directory} unknown TODOs: {sorted(unknown)}")
-    unresolved = [todo_id for todo_id in contract.todo_ids if todo_id in found]
+    todo_markers = [todo_id for todo_id in contract.todo_ids if todo_id in found]
     duplicates = sorted(
         todo_id for todo_id in set(found) if found.count(todo_id) > 1
     )
@@ -186,10 +186,11 @@ def check_contract(
         raise RuntimeError(
             f"{contract.directory} duplicate TODO markers: {duplicates}"
         )
-    if expect_unfinished and len(unresolved) != len(contract.todo_ids):
-        completed = sorted(set(contract.todo_ids) - set(unresolved))
+    if expect_all_todo_markers and len(todo_markers) != len(contract.todo_ids):
+        missing_markers = sorted(set(contract.todo_ids) - set(todo_markers))
         raise RuntimeError(
-            f"{contract.directory} expected untouched scaffold TODOs; missing {completed}"
+            f"{contract.directory} expected every original TODO marker; "
+            f"missing {missing_markers}"
         )
 
     if run_entry_points:
@@ -210,15 +211,20 @@ def check_contract(
                 f"{contract.directory} check failed ({result.returncode})\n"
                 f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
-    return len(unresolved), len(contract.todo_ids)
+    return len(todo_markers), len(contract.todo_ids)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--expect-unfinished",
+        "--expect-all-todo-markers",
+        dest="expect_all_todo_markers",
         action="store_true",
-        help="Require every original learning-target TODO to still be present.",
+        help=(
+            "Require every original learning-target TODO marker to still be "
+            "present; this does not determine exercise completion."
+        ),
     )
     parser.add_argument(
         "--structure-only",
@@ -227,23 +233,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    unresolved_total = 0
+    todo_markers_total = 0
     todo_total = 0
     for contract in CONTRACTS:
-        unresolved, total = check_contract(
+        todo_markers, total = check_contract(
             contract,
-            expect_unfinished=args.expect_unfinished,
+            expect_all_todo_markers=args.expect_all_todo_markers,
             run_entry_points=not args.structure_only,
         )
-        unresolved_total += unresolved
+        todo_markers_total += todo_markers
         todo_total += total
         print(
             f"{contract.directory}: PASS "
-            f"(unresolved learning targets {unresolved}/{total})"
+            f"(TODO markers present {todo_markers}/{total})"
         )
     print(
         f"All {len(CONTRACTS)} exercise scaffolds passed; "
-        f"unresolved learning targets {unresolved_total}/{todo_total}."
+        f"TODO markers present {todo_markers_total}/{todo_total}. "
+        "This is a scaffold-structure count, not a learning-progress score."
     )
 
 

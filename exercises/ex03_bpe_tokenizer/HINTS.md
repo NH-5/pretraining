@@ -70,6 +70,18 @@ trainer 模块。`require_tokenizers()` 已返回顶层模块，脚手架也已�
 先让输出目录存在，再保存。函数返回值应是调用者传入的输出路径，而不是 tokenizer
 对象。
 
+### 提示 4：精确往返与版本边界
+
+本练习要求 `decode(encode(text)) == text`，所以要主动核对当前 `tokenizers`
+版本中 ByteLevel 的前缀空格行为。若不希望编码器悄悄补一个开头空格，应显式使用
+`add_prefix_space=False`。为保证任意 UTF-8 字节都可表示，可把
+`ByteLevel.alphabet()` 作为 trainer 的初始字母表。
+
+`<unk>` 不是本练习的强制 special token：完整 byte alphabet 配合不指定
+`unk_token` 的 BPE 可以不需要它；如果你选择给 BPE 设置 `unk_token`，就必须也把
+同名 token 注册到 trainer，避免模型引用一个不存在的词表项。这里要按实际 API
+契约选择一种自洽方案，不要依赖库版本的隐式默认值。
+
 ### 最小调试语料
 
 先用十几行重复的小语料，不要一上来下载大数据：
@@ -96,6 +108,9 @@ newlines	must survive
 - special tokens 只是写进文本，没有注册进 trainer；
 - 硬编码词表大小，没有使用函数参数；
 - `vocab_size < 256 + special-token 数`；
+- 只保留 256 个 byte token、没有学到任何 merge，却把“可逆”误当成“BPE 已完成”；
+- 依赖 ByteLevel 默认的前缀空格行为，导致精确往返多出一个空格；
+- 设置了 BPE 的 `unk_token`，却没有把它注册进 trainer；
 - 保存前未创建父目录；
 - decode 时默认跳过了本应保留的普通文本；
 - 只测英文，中文或换行往返才暴露问题。

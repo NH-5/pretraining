@@ -14,7 +14,8 @@ uv run python exercises/ex06_scaling_math/train.py estimate \
 ```
 
 `check` 会分别给四个公式显示 `PASS / PENDING / FAIL`，并检查单位换算、
-卡数翻倍关系和 MFU 不超过 100% 的边界；不必等四个 TODO 全写完才运行。
+卡数翻倍关系和 MFU 不超过 100% 的边界；`self-test` 也覆盖这四个公式。
+不必等四个 TODO 全写完才运行 `check`。
 
 ## 你要完成
 

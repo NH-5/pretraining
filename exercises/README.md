@@ -58,11 +58,12 @@ uv run python exercises/check_scaffolds.py
 当前交付状态还可以额外验证所有预期 TODO 都保留着：
 
 ```bash
-uv run python exercises/check_scaffolds.py --expect-unfinished
+uv run python exercises/check_scaffolds.py --expect-all-todo-markers
 ```
 
-`--expect-unfinished` 只用于验收最初交付的空白脚手架。一旦开始填写 TODO，
-不要再把它当作学习进度判题器。
+`--expect-all-todo-markers` 只检查最初交付的 TODO 标记是否仍存在，不判断
+实现是否完成；兼容旧名称 `--expect-unfinished`。真正进度由当前练习的
+`check`、README 验收项和 `PROGRESS.md` 共同确认。
 
 ## 依赖何时加入
 

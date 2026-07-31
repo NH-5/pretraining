@@ -257,27 +257,100 @@ def _torchrun_context() -> DistributedContext:
 
 def _check_all_reduce() -> str:
     context = _torchrun_context()
-    model = nn.Linear(1, 1, bias=False).to(context.device)
-    parameter = next(model.parameters())
-    parameter.grad = torch.tensor(
-        [[float(context.rank + 1)]],
+
+    class GradientProbeModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first = nn.Parameter(torch.zeros(2, 3))
+            self.second = nn.Parameter(torch.zeros(4))
+            self.unused = nn.Parameter(torch.zeros(1))
+
+    model = GradientProbeModel().to(context.device)
+    rank_factor = float(context.rank + 1)
+    model.first.grad = torch.full_like(model.first, rank_factor)
+    second_pattern = torch.tensor(
+        [1.0, -2.0, 3.0, -4.0],
         device=context.device,
     )
+    model.second.grad = second_pattern * rank_factor
     average_gradients(model, context.world_size)
-    expected = (context.world_size + 1) / 2
-    if parameter.grad is None or not torch.allclose(
-        parameter.grad,
-        torch.full_like(parameter.grad, expected),
+    mean_rank_factor = (context.world_size + 1) / 2
+    expected_first = torch.full_like(model.first, mean_rank_factor)
+    expected_second = second_pattern * mean_rank_factor
+    if model.first.grad is None or not torch.allclose(
+        model.first.grad,
+        expected_first,
         rtol=0.0,
         atol=1e-7,
     ):
         raise RuntimeError(
-            f"Rank {context.rank} did not receive mean gradient {expected}."
+            f"Rank {context.rank} did not average the first parameter gradient."
         )
-    dist.barrier()
+    if model.second.grad is None or not torch.allclose(
+        model.second.grad,
+        expected_second,
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            f"Rank {context.rank} did not average every parameter gradient."
+        )
+    if model.unused.grad is not None:
+        raise RuntimeError("A parameter with grad=None must remain untouched.")
+
+    # Also exercise the function at its real call site: one optimizer update
+    # from rank-local losses must match a global-batch reference update.
+    torch.manual_seed(808)
+    candidate = nn.Linear(3, 2).to(context.device)
+    initial_state = {
+        name: tensor.detach().clone()
+        for name, tensor in candidate.state_dict().items()
+    }
+    candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=0.05)
+    local_generator = torch.Generator().manual_seed(8_080 + context.rank)
+    local_features = torch.randn(3, 3, generator=local_generator).to(context.device)
+    local_labels = torch.randint(
+        0,
+        2,
+        (3,),
+        generator=local_generator,
+    ).to(context.device)
+    candidate_optimizer.zero_grad(set_to_none=True)
+    F.cross_entropy(candidate(local_features), local_labels).backward()
+    average_gradients(candidate, context.world_size)
+    candidate_optimizer.step()
+
+    reference = nn.Linear(3, 2).to(context.device)
+    reference.load_state_dict(initial_state)
+    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.05)
+    global_batches = []
+    for rank in range(context.world_size):
+        generator = torch.Generator().manual_seed(8_080 + rank)
+        features = torch.randn(3, 3, generator=generator).to(context.device)
+        labels = torch.randint(0, 2, (3,), generator=generator).to(context.device)
+        global_batches.append((features, labels))
+    global_features = torch.cat([batch[0] for batch in global_batches], dim=0)
+    global_labels = torch.cat([batch[1] for batch in global_batches], dim=0)
+    reference_optimizer.zero_grad(set_to_none=True)
+    F.cross_entropy(reference(global_features), global_labels).backward()
+    reference_optimizer.step()
+    manual_difference = max(
+        (left - right).abs().max().item()
+        for left, right in zip(
+            candidate.parameters(),
+            reference.parameters(),
+            strict=True,
+        )
+    )
+    if manual_difference > 1e-6:
+        raise RuntimeError(
+            "Manual data-parallel update differs from the global-batch update: "
+            f"max_abs_diff={manual_difference:.3e}."
+        )
     return (
         f"rank={context.rank}; world_size={context.world_size}; "
-        f"mean gradient={parameter.grad.item():.6f}"
+        f"all parameter gradients averaged by factor={mean_rank_factor:.6f}; "
+        f"grad=None preserved; manual update diff={manual_difference:.3e}"
     )
 
 
@@ -317,7 +390,34 @@ def _check_single_card_equivalence() -> str:
             "DDP differs from the equivalent global-batch reference: "
             f"max_abs_diff={difference:.3e}."
         )
-    return f"rank={context.rank}; reference max_abs_diff={difference:.3e}"
+
+    unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
+    parameters = list(unwrapped.parameters())
+    if len(parameters) < 2:
+        raise RuntimeError("Equivalence probe needs at least two model parameters.")
+    with torch.no_grad():
+        parameters[-1].add_(0.01)
+    corrupted_difference = verify_against_single_card(
+        initial_state=initial_state,
+        distributed_model=model,
+        context=context,
+        config=config,
+    )
+    if not math.isfinite(corrupted_difference) or not math.isclose(
+        corrupted_difference,
+        0.01,
+        rel_tol=0.0,
+        abs_tol=1e-5,
+    ):
+        raise RuntimeError(
+            "Equivalence verification did not inspect every parameter: "
+            "after corrupting the last parameter by 0.01 it reported "
+            f"{corrupted_difference:.3e}."
+        )
+    return (
+        f"rank={context.rank}; clean max_abs_diff={difference:.3e}; "
+        f"last-parameter corruption detected={corrupted_difference:.3e}"
+    )
 
 
 def _check_fsdp_wrapper() -> str:
